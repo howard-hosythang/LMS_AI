@@ -21,6 +21,10 @@ class RecommenderBundle:
     item_id_to_idx: dict[int, int]
     idx_to_item_id: list[int]
     user_items_csr: csr_matrix
+    als_factors: int = 0
+    als_regularization: float = 0.0
+    als_iterations: int = 0
+    als_alpha: float = 0.0
 
 
 class RecommenderEngine:
@@ -32,8 +36,10 @@ class RecommenderEngine:
     async def load_or_train(self, conn_factory) -> None:
         async with self._lock:
             if self.settings.als_model_path.exists():
-                self._bundle = self._load_bundle(self.settings.als_model_path)
-                return
+                bundle = self._load_bundle(self.settings.als_model_path)
+                if self._bundle_matches_settings(bundle):
+                    self._bundle = bundle
+                    return
 
         await self.train_and_persist(conn_factory)
 
@@ -66,7 +72,7 @@ class RecommenderEngine:
 
         item_ids_idx, _scores = bundle.model.recommend(
             userid=user_idx,
-            user_items=bundle.user_items_csr,
+            user_items=bundle.user_items_csr[user_idx],
             N=limit * 3,
             filter_already_liked_items=True,
             recalculate_user=True,
@@ -87,11 +93,15 @@ class RecommenderEngine:
                     random_state=42,
                 ),
                 user_id_to_idx={},
-                idx_to_user_id=[],
-                item_id_to_idx={},
-                idx_to_item_id=[],
-                user_items_csr=csr_matrix((0, 0), dtype=np.float32),
-            )
+            idx_to_user_id=[],
+            item_id_to_idx={},
+            idx_to_item_id=[],
+            user_items_csr=csr_matrix((0, 0), dtype=np.float32),
+            als_factors=self.settings.als_factors,
+            als_regularization=self.settings.als_regularization,
+            als_iterations=self.settings.als_iterations,
+            als_alpha=self.settings.als_alpha,
+        )
 
         user_ids = sorted({int(row[0]) for row in rows})
         item_ids = sorted({int(row[1]) for row in rows})
@@ -105,7 +115,7 @@ class RecommenderEngine:
         for user_id, publication_id, score in rows:
             row_idx.append(user_id_to_idx[int(user_id)])
             col_idx.append(item_id_to_idx[int(publication_id)])
-            data.append(float(score))
+            data.append(1.0 + self.settings.als_alpha * float(score))
 
         user_items = csr_matrix(
             (data, (row_idx, col_idx)),
@@ -119,7 +129,7 @@ class RecommenderEngine:
             iterations=self.settings.als_iterations,
             random_state=42,
         )
-        model.fit(user_items.T)
+        model.fit(user_items.T.tocsr())
 
         return RecommenderBundle(
             model=model,
@@ -128,6 +138,10 @@ class RecommenderEngine:
             item_id_to_idx=item_id_to_idx,
             idx_to_item_id=item_ids,
             user_items_csr=user_items,
+            als_factors=self.settings.als_factors,
+            als_regularization=self.settings.als_regularization,
+            als_iterations=self.settings.als_iterations,
+            als_alpha=self.settings.als_alpha,
         )
 
     def _fetch_weighted_interactions(self, conn: PGConnection) -> list[tuple[int, int, float]]:
@@ -139,20 +153,20 @@ class RecommenderEngine:
                     user_id,
                     publication_id,
                     SUM(
-                        CASE action_type
-                            WHEN 'VIEW' THEN 1
-                            WHEN 'WISHLIST' THEN 3
-                            WHEN 'BORROW' THEN 5
+                        CASE type
+                            WHEN 'WATCH' THEN 1
+                            WHEN 'WISHLIST' THEN 5
+                            WHEN 'BORROWED' THEN 10
                             ELSE 0
                         END
                     )::float AS score
-                FROM library_core.user_interactions
+                FROM public.user_interactions
                 GROUP BY user_id, publication_id
                 HAVING SUM(
-                    CASE action_type
-                        WHEN 'VIEW' THEN 1
-                        WHEN 'WISHLIST' THEN 3
-                        WHEN 'BORROW' THEN 5
+                    CASE type
+                        WHEN 'WATCH' THEN 1
+                        WHEN 'WISHLIST' THEN 5
+                        WHEN 'BORROWED' THEN 10
                         ELSE 0
                     END
                 ) > 0
@@ -167,3 +181,11 @@ class RecommenderEngine:
         if not isinstance(loaded, RecommenderBundle):
             raise ValueError("Invalid ALS bundle file format")
         return loaded
+
+    def _bundle_matches_settings(self, bundle: RecommenderBundle) -> bool:
+        return (
+            getattr(bundle, "als_factors", None) == self.settings.als_factors
+            and getattr(bundle, "als_iterations", None) == self.settings.als_iterations
+            and abs(float(getattr(bundle, "als_regularization", -1.0)) - self.settings.als_regularization) < 1e-9
+            and abs(float(getattr(bundle, "als_alpha", -1.0)) - self.settings.als_alpha) < 1e-9
+        )

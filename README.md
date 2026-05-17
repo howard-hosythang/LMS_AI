@@ -6,9 +6,9 @@ Pipeline ETL cho xử lý PDF sách, tối ưu mạnh cho chi phí và thời gi
 
 1. Extract & Transform
 
-- Đọc PDF bằng `pypdf`.
-- Làm sạch text: loại bỏ ký tự null (`\x00`), chuẩn hóa whitespace/newline thành 1 khoảng trắng.
-- Chunking bằng Sliding Window: `chunk_size=1200`, `overlap=200`.
+- Đọc PDF bằng `PyMuPDF`.
+- Làm sạch text bằng Regex trước khi chunk: loại header/footer lặp, số trang, ký tự null (`\x00`), lỗi ngắt dòng và chuẩn hóa whitespace.
+- Chunking bằng Sliding Window theo ký tự: `chunk_size=1500`, `overlap=150`.
 
 2. Ingestion phase (non-LLM)
 
@@ -19,12 +19,12 @@ Pipeline ETL cho xử lý PDF sách, tối ưu mạnh cho chi phí và thời gi
 
 3. REDUCE phase
 
-- Chọn tập chunk đại diện (diverse + relevance) và giới hạn budget ký tự.
-- Gọi LLM 1 lần để tổng hợp metadata toàn cục.
+- Chọn tối đa 12 chunk đại diện (diverse + relevance), mỗi chunk tối đa 900 ký tự, tổng prompt khoảng 10.000 ký tự.
+- Gọi Gemini tối đa 1 lần mỗi sách để tổng hợp metadata toàn cục; nếu Gemini quá tải hoặc từ chối thì dùng fallback deterministic để hệ thống vẫn index được sách.
 - Ép JSON object gồm `master_summary`, `audience`, `tags` (đúng 5 tags).
-- Update `library_core.publications` cho `ai_summary`, `ai_target_audience`.
+- Update `public.publications` cho `ai_summary`, `ai_target_audience`.
 - Find-or-create tags bằng `ON CONFLICT DO NOTHING + RETURNING id`.
-- Ghi bảng nối `ai_engine.publication_tags`.
+- Ghi bảng nối thật của backend `public.publication_tags` để frontend hiển thị tag ngay trên trang chi tiết.
 
 ## Cấu trúc chính
 
@@ -135,16 +135,16 @@ Service độc lập cung cấp 2 API cho Backend Java:
 
 - Path: `POST /api/v1/semantic-search`
 - Input: `{ "query_text": "...", "limit": 10 }`
-- SQL dùng `embedding <=> query_vector` và `GROUP BY publication_id` + `MIN(distance)`.
+- SQL lấy nearest chunks bằng HNSW (`ORDER BY embedding <=> query_vector LIMIT ...`) rồi gom về publication.
 - Output: `{ "publication_ids": [1, 5, 9] }`
 
 ### Endpoint 2: Recommendations
 
 - Path: `POST /api/v1/recommendations`
 - Input: `{ "user_id": 123, "limit": 10 }`
-- Trọng số hành vi: VIEW=1, WISHLIST=3, BORROW=5.
-- Cold-start: nếu user chưa có tương tác, trả về trending theo `total_borrows`.
-- Post-filter: loại sách `available_copies = 0` trước khi trả về.
+- Trọng số hành vi: WATCH=1, WISHLIST=5, BORROWED=10; ALS dùng `cui = 1 + 40 * rui`.
+- Cold-start: nếu user chưa có tương tác, trả về trending theo tương tác, lượt mượn và rating; nếu có tương tác nhưng chưa có profile ALS thì chuyển sang Content-Based bằng vector sách đã xem.
+- Post-filter: chỉ trả về sách còn item AVAILABLE.
 
 ### Chạy FastAPI
 
@@ -164,6 +164,7 @@ uvicorn api_service:app --host 0.0.0.0 --port 8001 --workers 1
 - `AI_API_ALS_FACTORS`
 - `AI_API_ALS_REGULARIZATION`
 - `AI_API_ALS_ITERATIONS`
+- `AI_API_ALS_ALPHA`
 - `AI_API_ALS_MODEL_PATH`
 - `AI_API_ALS_RETRAIN_INTERVAL_SECONDS`
 

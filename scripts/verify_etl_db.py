@@ -29,7 +29,7 @@ def main() -> None:
             vector_count = int(vector_row[0]) if vector_row else 0
 
             cur.execute(
-                "SELECT COUNT(*) FROM ai_engine.publication_tags WHERE publication_id = %s",
+                "SELECT COUNT(*) FROM public.publication_tags WHERE publication_id = %s",
                 (args.book_id,),
             )
             tag_row = cur.fetchone()
@@ -38,7 +38,7 @@ def main() -> None:
             cur.execute(
                 """
                 SELECT ai_summary, ai_target_audience
-                FROM library_core.publications
+                FROM public.publications
                 WHERE id = %s
                 """,
                 (args.book_id,),

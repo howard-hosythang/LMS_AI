@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
 
+import fitz
 import requests
-from pypdf import PdfReader
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,11 @@ class Chunk:
 
 _NULL_CHAR_PATTERN = re.compile(r"\x00")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+_PAGE_NUMBER_PATTERN = re.compile(
+    r"^\s*(?:[-–—]\s*)?(?:page|trang)?\s*\d+(?:\s*/\s*\d+)?(?:\s*[-–—])?\s*$",
+    re.IGNORECASE,
+)
+_HEADER_FOOTER_REPEAT_THRESHOLD = 2
 
 
 def sanitize_text(text: str) -> str:
@@ -24,6 +29,65 @@ def sanitize_text(text: str) -> str:
     text = _NULL_CHAR_PATTERN.sub("", text)
     text = _WHITESPACE_PATTERN.sub(" ", text)
     return text.strip()
+
+
+def _normalize_layout_line(line: str) -> str:
+    line = _NULL_CHAR_PATTERN.sub("", line)
+    line = re.sub(r"\s+", " ", line).strip()
+    return line
+
+
+def _line_signature(line: str) -> str:
+    signature = _compact_whitespace(line.lower())
+    signature = re.sub(r"\d+", "#", signature)
+    return signature.strip(" -–—|")
+
+
+def _compact_whitespace(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _clean_pdf_pages(page_texts: list[str]) -> str:
+    """Remove repeated page furniture before downstream chunking."""
+    line_counts: dict[str, int] = {}
+    page_lines: list[list[str]] = []
+
+    for page_text in page_texts:
+        lines = [_normalize_layout_line(line) for line in page_text.splitlines()]
+        lines = [line for line in lines if line]
+        page_lines.append(lines)
+
+        candidates = lines[:3] + lines[-3:]
+        for line in candidates:
+            if _PAGE_NUMBER_PATTERN.match(line):
+                continue
+            signature = _line_signature(line)
+            if signature:
+                line_counts[signature] = line_counts.get(signature, 0) + 1
+
+    min_repeats = min(
+        max(_HEADER_FOOTER_REPEAT_THRESHOLD, len(page_texts) // 3),
+        max(_HEADER_FOOTER_REPEAT_THRESHOLD, len(page_texts)),
+    )
+    repeated_furniture = {
+        signature for signature, count in line_counts.items()
+        if count >= min_repeats
+    }
+
+    cleaned_parts: list[str] = []
+    for lines in page_lines:
+        kept: list[str] = []
+        for line in lines:
+            if _PAGE_NUMBER_PATTERN.match(line):
+                continue
+            if _line_signature(line) in repeated_furniture:
+                continue
+            kept.append(line)
+        cleaned_parts.append(" ".join(kept))
+
+    text = "\n".join(cleaned_parts)
+    text = re.sub(r"(?<=\w)-\s+(?=\w)", "", text)
+    return sanitize_text(text)
 
 
 def extract_pdf_text(pdf_source: Union[Path, str]) -> str:
@@ -40,18 +104,21 @@ def extract_pdf_text(pdf_source: Union[Path, str]) -> str:
             tmp.write(response.content)
             tmp_path = tmp.name
         try:
-            reader = PdfReader(tmp_path)
+            doc = fitz.open(tmp_path)
         finally:
-            Path(tmp_path).unlink()
+            tmp_path_obj = Path(tmp_path)
     else:
         # Local file
-        reader = PdfReader(str(pdf_source))
+        doc = fitz.open(str(pdf_source))
 
-    parts: list[str] = []
-    for page in reader.pages:
-        page_text = page.extract_text() or ""
-        parts.append(page_text)
-    return sanitize_text(" ".join(parts))
+    try:
+        parts = [page.get_text("text") or "" for page in doc]
+    finally:
+        doc.close()
+        if isinstance(pdf_source, str) and (pdf_source.startswith('http://') or pdf_source.startswith('https://')):
+            tmp_path_obj.unlink(missing_ok=True)
+
+    return _clean_pdf_pages(parts)
 
 
 def sliding_window_chunk(text: str, chunk_size: int, overlap: int) -> list[Chunk]:

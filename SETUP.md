@@ -89,7 +89,7 @@ pip list | grep -E "fastapi|torch|sentence-transformers|psycopg2"
 - `sentence-transformers==3.4.1` - Embedding models
 - `psycopg2-binary==2.9.11` - PostgreSQL driver
 - `celery==5.4.0` - Task queue worker
-- `pypdf==6.9.2` - PDF processing
+- `PyMuPDF==1.24.14` - PDF processing
 
 **Thời Gian Cài Đặt:** ~5-15 phút (tùy tốc độ internet)
 
@@ -135,14 +135,14 @@ DATABASE_URL=postgresql://postgres:postgres@localhost:5433/postgres
 RABBITMQ_URL=amqp://guest:guest@localhost:5672/
 
 # Tốc độ xử lý PDF
-AI_ETL_CHUNK_SIZE=1800           # Tăng = xử lý ít chunk hơn (nhanh hơn)
-AI_ETL_CHUNK_OVERLAP=150         # Giữ nguyên cho kết quả tốt
+AI_ETL_CHUNK_SIZE=1500           # Chunk theo ký tự, cân bằng semantic quality và số vector
+AI_ETL_CHUNK_OVERLAP=150         # Giữ ngữ cảnh ở biên chunk
 
 # Số lượng chunks để tạo summary
-AI_ETL_REDUCE_MAX_CHUNKS=30      # Tăng = chi tiết hơn (tốn chi phí API)
+AI_ETL_REDUCE_MAX_CHUNKS=12      # Giữ thấp để phù hợp Gemini free tier
 
 # Timeout cho API calls
-AI_ETL_LLM_TIMEOUT_SECONDS=60    # Tăng nếu API chậm
+AI_ETL_LLM_TIMEOUT_SECONDS=30    # Fail nhanh rồi dùng fallback local nếu Gemini quá tải
 ```
 
 **Kiểm Tra Cấu Hình:**

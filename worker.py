@@ -67,6 +67,7 @@ def on_worker_process_init(**_: Any) -> None:
         premium_model=SETTINGS.gemini_model_premium,
         timeout_seconds=SETTINGS.llm_timeout_seconds,
         retry_attempts=SETTINGS.llm_retry_attempts,
+        min_request_interval_seconds=SETTINGS.gemini_min_request_interval_seconds,
     )
     embedding_client = EmbeddingClient(SETTINGS.embedding_model_name)
     PIPELINE = AIEtlPipeline(
@@ -157,6 +158,16 @@ def process_book_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         return result
 
     except Exception as exc:
+        if book_id > 0:
+            try:
+                file_hash = AIEtlPipeline._calculate_file_hash(pdf_path if pdf_path is not None else payload.get("pdf_url", ""))
+                with db_pool.connection() as conn:
+                    pipeline.database.ensure_etl_metadata_table(conn)
+                    pipeline.database.mark_publication_etl_failed(conn, book_id, file_hash, str(exc))
+                    conn.commit()
+            except Exception:
+                pass
+
         error_payload = {
             "book_id": book_id,
             "status": "FAILED",

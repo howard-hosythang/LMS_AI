@@ -9,6 +9,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
+    postgresql-client \
     libpq-dev \
     poppler-utils \
     curl \
@@ -19,6 +20,6 @@ RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
 COPY . /app
 
-RUN chmod +x /app/scripts/run_api.sh /app/scripts/run_worker.sh
+RUN chmod +x /app/scripts/run_api.sh /app/scripts/run_worker.sh /app/docker-entrypoint.sh
 
 EXPOSE 8001

@@ -16,11 +16,13 @@ class ApiSettings:
     statement_timeout_ms: int
     default_search_limit: int
     max_search_limit: int
+    search_min_similarity: float
     default_recommend_limit: int
     max_recommend_limit: int
     als_factors: int
     als_regularization: float
     als_iterations: int
+    als_alpha: float
     als_model_path: Path
     als_retrain_interval_seconds: int
 
@@ -45,11 +47,13 @@ def load_api_settings() -> ApiSettings:
         statement_timeout_ms=int(os.getenv("AI_API_DB_STATEMENT_TIMEOUT_MS", "5000")),
         default_search_limit=int(os.getenv("AI_API_DEFAULT_SEARCH_LIMIT", "10")),
         max_search_limit=int(os.getenv("AI_API_MAX_SEARCH_LIMIT", "50")),
+        search_min_similarity=float(os.getenv("AI_API_SEARCH_MIN_SIMILARITY", "0.42")),
         default_recommend_limit=int(os.getenv("AI_API_RECOMMEND_DEFAULT_LIMIT", "10")),
         max_recommend_limit=int(os.getenv("AI_API_RECOMMEND_MAX_LIMIT", "50")),
-        als_factors=int(os.getenv("AI_API_ALS_FACTORS", "64")),
-        als_regularization=float(os.getenv("AI_API_ALS_REGULARIZATION", "0.01")),
-        als_iterations=int(os.getenv("AI_API_ALS_ITERATIONS", "20")),
+        als_factors=int(os.getenv("AI_API_ALS_FACTORS", "32")),
+        als_regularization=float(os.getenv("AI_API_ALS_REGULARIZATION", "0.05")),
+        als_iterations=int(os.getenv("AI_API_ALS_ITERATIONS", "15")),
+        als_alpha=float(os.getenv("AI_API_ALS_ALPHA", "40")),
         als_model_path=als_model_path,
         als_retrain_interval_seconds=int(os.getenv("AI_API_ALS_RETRAIN_INTERVAL_SECONDS", "3600")),
     )

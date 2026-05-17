@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
+import unicodedata
 from pathlib import Path
 from typing import Union
 
 import numpy as np
-import requests
 from psycopg2.extensions import connection as PGConnection
 
 from .config import Settings
@@ -34,43 +35,61 @@ class AIEtlPipeline:
         publication_id: int,
         pdf_path: Union[Path, str],
         conn: PGConnection | None = None,
+        force_reprocess: bool = False,
     ) -> dict[str, object]:
-        full_text = extract_pdf_text(pdf_path)
         file_hash = self._calculate_file_hash(pdf_path)
-        chunks = sliding_window_chunk(
-            text=full_text,
-            chunk_size=self.settings.chunk_size,
-            overlap=self.settings.chunk_overlap,
-        )
-        if not chunks:
-            raise ValueError("No valid text chunks extracted from PDF")
-
         if conn is not None:
-            return self._run_with_connection(conn, publication_id, chunks, file_hash)
+            return self._run_with_connection(conn, publication_id, pdf_path, file_hash, force_reprocess)
 
         with self.database.connect() as conn:
-            return self._run_with_connection(conn, publication_id, chunks, file_hash)
+            return self._run_with_connection(conn, publication_id, pdf_path, file_hash, force_reprocess)
 
     def _run_with_connection(
         self,
         conn: PGConnection,
         publication_id: int,
-        chunks: list[Chunk],
+        pdf_path: Union[Path, str],
         file_hash: str,
+        force_reprocess: bool = False,
     ) -> dict[str, object]:
         self.database.ensure_etl_metadata_table(conn)
+        self.database.mark_publication_etl_running(conn, publication_id, file_hash)
+        conn.commit()
 
-        if self.settings.enable_hash_skip:
-            existing_hash = self.database.get_publication_file_hash(conn, publication_id)
-            has_vectors = self.database.publication_has_vectors(conn, publication_id)
-            if existing_hash == file_hash and has_vectors:
-                return {
-                    "publication_id": publication_id,
-                    "chunks": len(chunks),
-                    "vectors": 0,
-                    "skipped": True,
-                    "skip_reason": "file_hash_unchanged",
-                }
+        try:
+            full_text = extract_pdf_text(pdf_path)
+            chunks = sliding_window_chunk(
+                text=full_text,
+                chunk_size=self.settings.chunk_size,
+                overlap=self.settings.chunk_overlap,
+            )
+            if not chunks:
+                raise ValueError("No valid text chunks extracted from PDF")
+
+            if self.settings.enable_hash_skip and not force_reprocess:
+                existing_hash = self.database.get_publication_file_hash(conn, publication_id)
+                has_outputs = self.database.publication_has_ai_outputs(conn, publication_id)
+                if existing_hash == file_hash and has_outputs:
+                    self.database.upsert_publication_file_hash(
+                        conn,
+                        publication_id,
+                        file_hash,
+                        chunks_count=len(chunks),
+                        vectors_count=0,
+                    )
+                    conn.commit()
+                    return {
+                        "publication_id": publication_id,
+                        "chunks": len(chunks),
+                        "vectors": 0,
+                        "skipped": True,
+                        "skip_reason": "file_hash_unchanged",
+                    }
+        except Exception as exc:
+            conn.rollback()
+            self.database.mark_publication_etl_failed(conn, publication_id, file_hash, str(exc))
+            conn.commit()
+            raise
 
         self.database.clear_previous_ai_data(conn, publication_id)
         conn.commit()
@@ -96,8 +115,11 @@ class AIEtlPipeline:
         if not reduce_inputs:
             raise ValueError("No representative chunks available for reduce phase")
 
+        publication_context = self.database.get_publication_context(conn, publication_id)
+        reduce_inputs_with_context = [publication_context, *reduce_inputs] if publication_context else reduce_inputs
+        reduce_result = self._reduce_with_fallback(reduce_inputs_with_context)
+
         try:
-            reduce_result = self.llm_client.reduce_publication(reduce_inputs)
             self.database.update_publication_summary(
                 conn,
                 publication_id,
@@ -110,7 +132,13 @@ class AIEtlPipeline:
                 for tag_name in reduce_result["tags"]
             ]
             self.database.insert_publication_tag_links(conn, publication_id, tag_ids)
-            self.database.upsert_publication_file_hash(conn, publication_id, file_hash)
+            self.database.upsert_publication_file_hash(
+                conn,
+                publication_id,
+                file_hash,
+                chunks_count=len(chunks),
+                vectors_count=len(vectors),
+            )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -126,6 +154,179 @@ class AIEtlPipeline:
             "audience": reduce_result["audience"],
             "tags": reduce_result["tags"],
         }
+
+    def _reduce_with_fallback(self, reduce_inputs: list[str]) -> dict[str, object]:
+        try:
+            return self.llm_client.reduce_publication(reduce_inputs)
+        except Exception:
+            return self._fallback_reduce_publication(reduce_inputs)
+
+    def _fallback_reduce_publication(self, reduce_inputs: list[str]) -> dict[str, object]:
+        context = self._parse_publication_context(reduce_inputs[0] if reduce_inputs else "")
+        joined_text = self._clean_summary_source(" ".join(reduce_inputs))
+
+        title = context.get("title")
+        description = context.get("description")
+        authors = context.get("authors")
+        categories = context.get("categories")
+        fallback_tags = self._extract_fallback_tags(joined_text, context)
+
+        if title or description:
+            weak_description = bool(description) and len(description) < 80
+            if weak_description and categories:
+                subject = f"các chủ đề {categories}, với trọng tâm là {', '.join(fallback_tags[:3]).lower()}"
+            else:
+                subject = description or categories or "nội dung chuyên môn của ấn phẩm"
+            author_part = f" của {authors}" if authors else ""
+            category_part = f" thuộc nhóm {categories}" if categories else ""
+            summary = (
+                f"{title or 'Ấn phẩm này'}{author_part} là tài liệu{category_part}. "
+                f"Nội dung chính tập trung vào {subject}. "
+                "Tài liệu phù hợp cho người học cần nắm nền tảng, thuật ngữ và cách tiếp cận thực hành "
+                "trong lĩnh vực tương ứng. Nội dung đã được hệ thống làm sạch, lập chỉ mục ngữ nghĩa "
+                "và dùng để gợi ý các tài liệu liên quan trong thư viện."
+            )
+        else:
+            summary = joined_text[:700].strip()
+            if len(joined_text) > 700:
+                summary = summary.rstrip(" .,;:") + "..."
+
+        if not summary:
+            summary = "Tài liệu đã được hệ thống AI trích xuất và lập chỉ mục để phục vụ tìm kiếm ngữ nghĩa."
+
+        return {
+            "master_summary": summary,
+            "audience": self._infer_faculty(joined_text),
+            "tags": fallback_tags,
+        }
+
+    @staticmethod
+    def _clean_summary_source(text: str) -> str:
+        text = re.sub(r"(?i)\b(title|subtitle|description|authors|categories):", " ", text)
+        text = re.sub(r"\.{4,}", " ", text)
+        text = re.sub(r"\b\d+\s*/\s*\d+\b", " ", text)
+        text = re.sub(r"\bpage\s+\d+\b", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip()
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        useful = []
+        noise_terms = ("contents", "table of contents", "references", "bibliography", "copyright")
+        for sentence in sentences:
+            lowered = sentence.lower()
+            symbol_ratio = sum(1 for ch in sentence if ch in "=∑∫√≤≥<>|{}[]") / max(len(sentence), 1)
+            if len(sentence) < 40 or any(term in lowered for term in noise_terms):
+                continue
+            if symbol_ratio > 0.06:
+                continue
+            useful.append(sentence)
+        return " ".join(useful[:8]) or text
+
+    @staticmethod
+    def _parse_publication_context(text: str) -> dict[str, str]:
+        context: dict[str, str] = {}
+        for line in text.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            key = key.strip().lower()
+            value = value.strip()
+            if value:
+                context[key] = value
+        return context
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        normalized = unicodedata.normalize("NFD", text.lower())
+        without_marks = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+        return without_marks.replace("đ", "d")
+
+    def _infer_faculty(self, text: str) -> str:
+        normalized = self._normalize_text(text)
+        keyword_map = [
+            ("KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH", ("computer", "software", "algorithm", "data", "program", "code", "lap trinh", "thuat toan", "co so du lieu")),
+            ("KHOA_DIEN_DIEN_TU", ("dien", "dien tu", "circuit", "electronics", "signal")),
+            ("KHOA_CO_KHI", ("co khi", "mechanical", "manufacturing")),
+            ("KHOA_KY_THUAT_HOA_HOC", ("hoa hoc", "chemical", "chemistry")),
+            ("KHOA_KY_THUAT_XAY_DUNG", ("xay dung", "construction", "civil")),
+            ("KHOA_KY_THUAT_GIAO_THONG", ("giao thong", "transport", "traffic")),
+            ("KHOA_QUAN_LY_CONG_NGHIEP", ("quan ly", "management", "industrial")),
+            ("KHOA_MOI_TRUONG_VA_TAI_NGUYEN", ("moi truong", "environment", "resource")),
+            ("KHOA_CONG_NGHE_VAT_LIEU", ("vat lieu", "material")),
+            ("KHOA_KHOA_HOC_UNG_DUNG", ("toan", "physics", "applied", "ung dung")),
+            ("KHOA_KY_THUAT_DIA_CHAT_VA_DAU_KHI", ("dia chat", "dau khi", "geology", "petroleum")),
+        ]
+        for faculty, keywords in keyword_map:
+            if any(keyword in normalized for keyword in keywords):
+                return faculty
+        return "KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH"
+
+    def _extract_fallback_tags(self, text: str, context: dict[str, str] | None = None) -> list[str]:
+        context = context or {}
+        source = " ".join([
+            context.get("title", ""),
+            context.get("subtitle", ""),
+            context.get("description", ""),
+            context.get("categories", ""),
+            text,
+        ])
+        normalized_source = self._normalize_text(source)
+        tags: list[str] = []
+
+        domain_patterns = [
+            ("Machine Learning", ("machine learning", "hoc may")),
+            ("Deep Learning", ("deep learning", "hoc sau")),
+            ("Trí Tuệ Nhân Tạo", ("artificial intelligence", "tri tue nhan tao", " ai ")),
+            ("Khoa Học Dữ Liệu", ("data science", "du lieu", "data")),
+            ("Lập Trình", ("lap trinh", "programming", "code", "python", "java")),
+            ("Thuật Toán", ("thuat toan", "algorithm")),
+            ("Cơ Sở Dữ Liệu", ("co so du lieu", "database")),
+            ("Kiến Trúc Phần Mềm", ("kien truc phan mem", "software architecture")),
+            ("Công Nghệ Thông Tin", ("cong nghe thong tin", "computer science", "may tinh")),
+            ("Toán Ứng Dụng", ("toan", "xac suat", "thong ke", "linear algebra")),
+        ]
+        padded_source = f" {normalized_source} "
+        for tag, keywords in domain_patterns:
+            if any(keyword in padded_source for keyword in keywords):
+                tags.append(tag)
+
+        for category in re.split(r"[,;/]", context.get("categories", "")):
+            clean_category = category.strip()
+            if 3 <= len(clean_category) <= 50:
+                tags.append(clean_category)
+
+        for title_part in re.split(r"[:;\-–—]", context.get("title", "")):
+            clean_title = title_part.strip()
+            if 3 <= len(clean_title) <= 50 and len(clean_title.split()) <= 5:
+                tags.append(clean_title)
+
+        normalized = self._normalize_text(text)
+        words = re.findall(r"[a-zA-Z0-9_]{3,}|[a-zA-ZÀ-ỹ]{3,}", normalized)
+        stopwords = {
+            "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
+            "you", "your", "not", "can", "will", "book", "chapter", "page",
+            "public", "private", "string", "return", "class", "void", "null", "true", "false", "int", "new",
+            "cac", "cua", "cho", "voi", "mot", "nhung", "duoc", "trong", "khong",
+            "nguoi", "sach", "phan", "chuong",
+        }
+        counts: dict[str, int] = {}
+        for word in words:
+            if word in stopwords or len(word) < 3:
+                continue
+            counts[word] = counts.get(word, 0) + 1
+
+        for word, _count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:8]:
+            if len(tags) >= 5:
+                break
+            if word in {"toan", "cach", "ham", "bai", "bang", "theo", "nay", "thi", "khi", "nhu"}:
+                continue
+            tags.append(word.replace("_", " ").title())
+
+        fallback = ["Lập Trình", "Công Nghệ", "Phần Mềm", "Kỹ Thuật", "Khoa Học Máy Tính"]
+        for tag in fallback:
+            if len(tags) >= 5:
+                break
+            if tag not in tags:
+                tags.append(tag)
+        return list(dict.fromkeys(tags))[:5]
 
     @staticmethod
     def _calculate_file_hash(pdf_source: Union[Path, str]) -> str:
@@ -199,7 +400,7 @@ class AIEtlPipeline:
         total_chars = 0
 
         for text in texts:
-            clipped = text[: self.settings.reduce_max_chars_per_chunk].strip()
+            clipped = self._clean_summary_source(text)[: self.settings.reduce_max_chars_per_chunk].strip()
             if not clipped:
                 continue
 
