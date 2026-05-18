@@ -17,6 +17,7 @@ from ai_etl.pipeline import AIEtlPipeline
 from ai_gateway.config import ApiSettings, load_api_settings
 from ai_gateway.recommender import RecommenderEngine
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from psycopg2.extras import Json
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
@@ -689,7 +690,11 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/api/v1/publications/process", response_model=ProcessPublicationResponse)
+@app.post(
+    "/api/v1/publications/process",
+    response_model=ProcessPublicationResponse,
+    response_class=JSONResponse,
+)
 def process_publication(request: ProcessPublicationRequest) -> ProcessPublicationResponse:
     app_state: AppState = app.state.ctx
     pdf_source = _resolve_pdf_source(app_state, request)
