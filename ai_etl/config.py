@@ -25,6 +25,7 @@ class Settings:
     llm_timeout_seconds: int
     llm_retry_attempts: int
     webhook_timeout_seconds: int
+    backend_webhook_secret: str
     worker_db_pool_minconn: int
     worker_db_pool_maxconn: int
 
@@ -49,6 +50,10 @@ def load_settings() -> Settings:
     gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not gemini_api_key:
         raise ValueError("GEMINI_API_KEY is required")
+
+    backend_webhook_secret = os.getenv("BACKEND_WEBHOOK_SECRET", "").strip()
+    if not backend_webhook_secret:
+        raise ValueError("BACKEND_WEBHOOK_SECRET is required")
 
     chunk_size = int(os.getenv("AI_ETL_CHUNK_SIZE", "1500"))
     chunk_overlap = int(os.getenv("AI_ETL_CHUNK_OVERLAP", "150"))
@@ -79,6 +84,7 @@ def load_settings() -> Settings:
         llm_timeout_seconds=int(os.getenv("AI_ETL_LLM_TIMEOUT_SECONDS", "30")),
         llm_retry_attempts=int(os.getenv("AI_ETL_LLM_RETRY_ATTEMPTS", "2")),
         webhook_timeout_seconds=int(os.getenv("AI_ETL_WEBHOOK_TIMEOUT_SECONDS", "8")),
+        backend_webhook_secret=backend_webhook_secret,
         worker_db_pool_minconn=int(os.getenv("AI_ETL_DB_POOL_MINCONN", "1")),
         worker_db_pool_maxconn=int(os.getenv("AI_ETL_DB_POOL_MAXCONN", "6")),
     )

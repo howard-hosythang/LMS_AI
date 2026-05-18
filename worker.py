@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import hmac
+import hashlib
+import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -120,9 +124,22 @@ def _download_pdf_to_temp(pdf_url: str) -> tuple[Path, Path]:
     return temp_dir, pdf_path
 
 
-def _post_webhook(webhook_url: str, payload: dict[str, Any], timeout_seconds: int) -> None:
+def _build_webhook_headers(payload_body: str, secret: str) -> dict[str, str]:
+    timestamp = str(int(time.time()))
+    signed_payload = f"{timestamp}.{payload_body}".encode("utf-8")
+    signature = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+    return {
+        "Content-Type": "application/json",
+        "X-AI-Callback-Timestamp": timestamp,
+        "X-AI-Callback-Signature": f"sha256={signature}",
+    }
+
+
+def _post_webhook(webhook_url: str, payload: dict[str, Any], timeout_seconds: int, secret: str) -> None:
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    headers = _build_webhook_headers(body, secret)
     try:
-        response = requests.post(webhook_url, json=payload, timeout=timeout_seconds)
+        response = requests.post(webhook_url, data=body.encode("utf-8"), headers=headers, timeout=timeout_seconds)
         response.raise_for_status()
     except RequestException as exc:
         raise TransientWorkerError(f"Webhook callback failed: {exc}") from exc
@@ -154,7 +171,12 @@ def process_book_message(self, payload: dict[str, Any]) -> dict[str, Any]:
             "book_id": book_id,
             "status": "SUCCESS",
         }
-        _post_webhook(webhook_url, success_payload, settings.webhook_timeout_seconds)
+        _post_webhook(
+            webhook_url,
+            success_payload,
+            settings.webhook_timeout_seconds,
+            settings.backend_webhook_secret,
+        )
         return result
 
     except Exception as exc:
@@ -175,7 +197,12 @@ def process_book_message(self, payload: dict[str, Any]) -> dict[str, Any]:
         }
         if webhook_url:
             try:
-                _post_webhook(webhook_url, error_payload, settings.webhook_timeout_seconds)
+                _post_webhook(
+                    webhook_url,
+                    error_payload,
+                    settings.webhook_timeout_seconds,
+                    settings.backend_webhook_secret,
+                )
             except Exception:
                 # Keep original exception context for retry/raise below.
                 pass

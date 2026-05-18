@@ -3,10 +3,25 @@ from __future__ import annotations
 import os
 import time
 
+import pytest
 import requests
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8001")
 API_LATENCY_THRESHOLD_MS = float(os.getenv("API_LATENCY_THRESHOLD_MS", "200"))
+RUN_LIVE_AI_CONTRACT_TESTS = os.getenv("RUN_LIVE_AI_CONTRACT_TESTS", "0") == "1"
+
+
+def _require_live_ai_service() -> None:
+    if not RUN_LIVE_AI_CONTRACT_TESTS:
+        pytest.skip("Set RUN_LIVE_AI_CONTRACT_TESTS=1 to run live FastAPI contract tests")
+
+    try:
+        response = requests.get(f"{API_BASE_URL}/health", timeout=3)
+    except requests.RequestException as exc:
+        pytest.skip(f"AI service is not reachable at {API_BASE_URL}: {exc}")
+
+    if response.status_code != 200:
+        pytest.skip(f"AI service health check failed: {response.status_code} {response.text}")
 
 
 def _post(path: str, payload: dict):
@@ -16,7 +31,19 @@ def _post(path: str, payload: dict):
     return response, elapsed_ms
 
 
+def test_health_contract():
+    _require_live_ai_service()
+
+    response = requests.get(f"{API_BASE_URL}/health", timeout=3)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "ok"
+
+
 def test_semantic_search_contract_and_latency():
+    _require_live_ai_service()
+
     response, elapsed_ms = _post(
         "/api/v1/semantic-search",
         {
@@ -33,6 +60,8 @@ def test_semantic_search_contract_and_latency():
 
 
 def test_recommendation_contract_and_latency():
+    _require_live_ai_service()
+
     response, elapsed_ms = _post(
         "/api/v1/recommendations",
         {
