@@ -12,6 +12,8 @@ from psycopg2.extensions import connection as PGConnection
 from psycopg2.extras import execute_values
 from psycopg2.pool import SimpleConnectionPool
 
+from .tag_quality import clean_ai_tag, is_low_quality_tag
+
 
 class DatabaseConnectionPool:
     def __init__(self, database_url: str, minconn: int, maxconn: int) -> None:
@@ -53,10 +55,6 @@ class Database:
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM ai_engine.publication_vectors WHERE publication_id = %s",
-                (publication_id,),
-            )
-            cur.execute(
-                "DELETE FROM ai_engine.publication_tags WHERE publication_id = %s",
                 (publication_id,),
             )
             cur.execute(
@@ -312,7 +310,10 @@ class Database:
                 raise ValueError(f"Publication {publication_id} not found in public.publications")
 
     def find_or_create_tag_id(self, conn: PGConnection, tag_name: str) -> int:
-        normalized_tag = self._normalize_public_tag_name(tag_name)
+        if is_low_quality_tag(tag_name):
+            raise ValueError(f"AI tag is too generic or invalid: {tag_name}")
+
+        normalized_tag = self._normalize_public_tag_name(clean_ai_tag(tag_name))
         if not normalized_tag:
             raise ValueError("Tag name is empty after normalization")
 
@@ -369,6 +370,77 @@ class Database:
                 template="(%s, %s, %s)",
             )
 
+    def upsert_publication_translation(
+        self,
+        conn: PGConnection,
+        publication_id: int,
+        language_code: str,
+        title: str | None,
+        subtitle: str | None,
+        description: str | None,
+        ai_summary: str | None,
+    ) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO public.publication_translations (
+                    publication_id,
+                    language_code,
+                    title,
+                    subtitle,
+                    description,
+                    ai_summary,
+                    created_at,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (publication_id, language_code)
+                DO UPDATE SET
+                    title = COALESCE(EXCLUDED.title, public.publication_translations.title),
+                    subtitle = COALESCE(EXCLUDED.subtitle, public.publication_translations.subtitle),
+                    description = COALESCE(EXCLUDED.description, public.publication_translations.description),
+                    ai_summary = COALESCE(EXCLUDED.ai_summary, public.publication_translations.ai_summary),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (publication_id, language_code, title, subtitle, description, ai_summary),
+            )
+
+    def upsert_tag_translations(
+        self,
+        conn: PGConnection,
+        tag_ids: list[int],
+        translated_names: list[str],
+        language_code: str = "en",
+    ) -> None:
+        rows = [
+            (tag_id, language_code, name.strip()[:100])
+            for tag_id, name in zip(tag_ids, translated_names)
+            if name and name.strip()
+        ]
+        if not rows:
+            return
+
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO public.tag_translations (
+                    tag_id,
+                    language_code,
+                    name,
+                    created_at,
+                    updated_at
+                )
+                VALUES %s
+                ON CONFLICT (tag_id, language_code)
+                DO UPDATE SET
+                    name = EXCLUDED.name,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                rows,
+                template="(%s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            )
+
     @staticmethod
     def _generate_bigint_id() -> int:
         millis = int(time.time() * 1000) & ((1 << 42) - 1)
@@ -382,6 +454,6 @@ class Database:
         tag = re.sub(r"\s+", " ", tag).strip(" -_.")
         if not tag:
             return ""
-        if tag.isupper() or tag.islower():
+        if tag.islower():
             tag = tag.title()
         return tag[:50]

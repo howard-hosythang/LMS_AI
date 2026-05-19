@@ -22,6 +22,7 @@ class Settings:
     reduce_max_chars_per_chunk: int
     reduce_total_chars_budget: int
     enable_hash_skip: bool
+    enable_english_translation: bool
     llm_timeout_seconds: int
     llm_retry_attempts: int
     webhook_timeout_seconds: int
@@ -81,6 +82,10 @@ def load_settings() -> Settings:
         reduce_max_chars_per_chunk=int(os.getenv("AI_ETL_REDUCE_MAX_CHARS_PER_CHUNK", "900")),
         reduce_total_chars_budget=int(os.getenv("AI_ETL_REDUCE_TOTAL_CHARS_BUDGET", "10000")),
         enable_hash_skip=_parse_bool(os.getenv("AI_ETL_ENABLE_HASH_SKIP", "true"), True),
+        enable_english_translation=_parse_bool(
+            os.getenv("AI_ETL_ENABLE_ENGLISH_TRANSLATION", "false"),
+            False,
+        ),
         llm_timeout_seconds=int(os.getenv("AI_ETL_LLM_TIMEOUT_SECONDS", "30")),
         llm_retry_attempts=int(os.getenv("AI_ETL_LLM_RETRY_ATTEMPTS", "2")),
         webhook_timeout_seconds=int(os.getenv("AI_ETL_WEBHOOK_TIMEOUT_SECONDS", "8")),

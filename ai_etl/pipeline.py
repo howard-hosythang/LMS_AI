@@ -15,6 +15,7 @@ from .db import Database
 from .embedding_client import EmbeddingClient
 from .llm_client import GeminiClient
 from .pdf_processing import Chunk, extract_pdf_text, sliding_window_chunk
+from .tag_quality import align_english_tags, dedupe_quality_tags, suggest_tags_from_text
 
 
 class AIEtlPipeline:
@@ -116,8 +117,7 @@ class AIEtlPipeline:
             raise ValueError("No representative chunks available for reduce phase")
 
         publication_context = self.database.get_publication_context(conn, publication_id)
-        reduce_inputs_with_context = [publication_context, *reduce_inputs] if publication_context else reduce_inputs
-        reduce_result = self._reduce_with_fallback(reduce_inputs_with_context)
+        reduce_result = self._reduce_with_fallback(reduce_inputs, publication_context)
 
         try:
             self.database.update_publication_summary(
@@ -132,6 +132,25 @@ class AIEtlPipeline:
                 for tag_name in reduce_result["tags"]
             ]
             self.database.insert_publication_tag_links(conn, publication_id, tag_ids)
+            self.database.upsert_tag_translations(
+                conn,
+                tag_ids=tag_ids,
+                translated_names=align_english_tags(
+                    [str(tag) for tag in reduce_result["tags"]],
+                    [str(tag) for tag in reduce_result.get("tags_en", [])],
+                ),
+                language_code="en",
+            )
+            translation_generated = False
+            if self.settings.enable_english_translation:
+                translation_generated = self._try_upsert_english_metadata(
+                    conn,
+                    publication_id,
+                    publication_context,
+                    str(reduce_result["master_summary"]),
+                    [str(tag) for tag in reduce_result["tags"]],
+                    tag_ids,
+                )
             self.database.upsert_publication_file_hash(
                 conn,
                 publication_id,
@@ -153,51 +172,74 @@ class AIEtlPipeline:
             "master_summary": reduce_result["master_summary"],
             "audience": reduce_result["audience"],
             "tags": reduce_result["tags"],
+            "translation_generated": translation_generated,
         }
 
-    def _reduce_with_fallback(self, reduce_inputs: list[str]) -> dict[str, object]:
+    def _try_upsert_english_metadata(
+        self,
+        conn: PGConnection,
+        publication_id: int,
+        publication_context: str,
+        ai_summary_vi: str,
+        tags: list[str],
+        tag_ids: list[int],
+    ) -> bool:
         try:
-            return self.llm_client.reduce_publication(reduce_inputs)
-        except Exception:
-            return self._fallback_reduce_publication(reduce_inputs)
-
-    def _fallback_reduce_publication(self, reduce_inputs: list[str]) -> dict[str, object]:
-        context = self._parse_publication_context(reduce_inputs[0] if reduce_inputs else "")
-        joined_text = self._clean_summary_source(" ".join(reduce_inputs))
-
-        title = context.get("title")
-        description = context.get("description")
-        authors = context.get("authors")
-        categories = context.get("categories")
-        fallback_tags = self._extract_fallback_tags(joined_text, context)
-
-        if title or description:
-            weak_description = bool(description) and len(description) < 80
-            if weak_description and categories:
-                subject = f"các chủ đề {categories}, với trọng tâm là {', '.join(fallback_tags[:3]).lower()}"
-            else:
-                subject = description or categories or "nội dung chuyên môn của ấn phẩm"
-            author_part = f" của {authors}" if authors else ""
-            category_part = f" thuộc nhóm {categories}" if categories else ""
-            summary = (
-                f"{title or 'Ấn phẩm này'}{author_part} là tài liệu{category_part}. "
-                f"Nội dung chính tập trung vào {subject}. "
-                "Tài liệu phù hợp cho người học cần nắm nền tảng, thuật ngữ và cách tiếp cận thực hành "
-                "trong lĩnh vực tương ứng. Nội dung đã được hệ thống làm sạch, lập chỉ mục ngữ nghĩa "
-                "và dùng để gợi ý các tài liệu liên quan trong thư viện."
+            translation = self.llm_client.translate_catalog_metadata(
+                publication_context=publication_context,
+                ai_summary_vi=ai_summary_vi,
+                tags=tags,
             )
-        else:
-            summary = joined_text[:700].strip()
-            if len(joined_text) > 700:
-                summary = summary.rstrip(" .,;:") + "..."
+            self.database.upsert_publication_translation(
+                conn,
+                publication_id=publication_id,
+                language_code="en",
+                title=translation.get("title"),
+                subtitle=translation.get("subtitle"),
+                description=translation.get("description"),
+                ai_summary=translation.get("ai_summary"),
+            )
+            self.database.upsert_tag_translations(
+                conn,
+                tag_ids=tag_ids,
+                translated_names=translation.get("tags", []),
+                language_code="en",
+            )
+            return True
+        except Exception:
+            return False
+
+    def _reduce_with_fallback(
+        self,
+        reduce_inputs: list[str],
+        publication_context: str = "",
+    ) -> dict[str, object]:
+        try:
+            return self.llm_client.reduce_publication(reduce_inputs, publication_context)
+        except Exception:
+            return self._fallback_reduce_publication(reduce_inputs, publication_context)
+
+    def _fallback_reduce_publication(
+        self,
+        reduce_inputs: list[str],
+        publication_context: str = "",
+    ) -> dict[str, object]:
+        context = self._parse_publication_context(publication_context)
+        joined_text = self._clean_summary_source(" ".join(reduce_inputs))
+        fallback_tags = self._extract_fallback_tags(joined_text, context, publication_context)
+        summary = self._extractive_content_summary(joined_text)
 
         if not summary:
-            summary = "Tài liệu đã được hệ thống AI trích xuất và lập chỉ mục để phục vụ tìm kiếm ngữ nghĩa."
+            summary = (
+                "Chưa đủ nội dung trích xuất đáng tin cậy để tạo tóm tắt học thuật. "
+                "Cần kiểm tra lại file PDF hoặc chạy lại xử lý với bản tài liệu có văn bản đọc được."
+            )
 
         return {
             "master_summary": summary,
-            "audience": self._infer_faculty(joined_text),
+            "audience": self._infer_faculty(" ".join([joined_text, publication_context])),
             "tags": fallback_tags,
+            "tags_en": align_english_tags(fallback_tags),
         }
 
     @staticmethod
@@ -219,6 +261,45 @@ class AIEtlPipeline:
                 continue
             useful.append(sentence)
         return " ".join(useful[:8]) or text
+
+    @staticmethod
+    def _extractive_content_summary(text: str) -> str:
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        blocked_terms = (
+            "title:",
+            "subtitle:",
+            "description:",
+            "authors:",
+            "categories:",
+            "copyright",
+            "references",
+            "bibliography",
+            "table of contents",
+            "contents",
+        )
+        candidates: list[str] = []
+        for sentence in sentences:
+            clean = re.sub(r"\s+", " ", sentence).strip()
+            lowered = clean.lower()
+            if len(clean) < 70 or len(clean) > 360:
+                continue
+            if any(term in lowered for term in blocked_terms):
+                continue
+            alpha_ratio = sum(ch.isalpha() for ch in clean) / max(len(clean), 1)
+            symbol_ratio = sum(1 for ch in clean if ch in "=∑∫√≤≥<>|{}[]") / max(len(clean), 1)
+            if alpha_ratio < 0.55 or symbol_ratio > 0.04:
+                continue
+            candidates.append(clean)
+            if len(candidates) >= 5:
+                break
+
+        if not candidates:
+            return ""
+
+        summary = " ".join(candidates)
+        if len(summary) > 950:
+            summary = summary[:950].rsplit(" ", 1)[0].rstrip(" .,;:") + "."
+        return summary
 
     @staticmethod
     def _parse_publication_context(text: str) -> dict[str, str]:
@@ -259,7 +340,12 @@ class AIEtlPipeline:
                 return faculty
         return "KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH"
 
-    def _extract_fallback_tags(self, text: str, context: dict[str, str] | None = None) -> list[str]:
+    def _extract_fallback_tags(
+        self,
+        text: str,
+        context: dict[str, str] | None = None,
+        publication_context: str = "",
+    ) -> list[str]:
         context = context or {}
         source = " ".join([
             context.get("title", ""),
@@ -268,65 +354,27 @@ class AIEtlPipeline:
             context.get("categories", ""),
             text,
         ])
-        normalized_source = self._normalize_text(source)
-        tags: list[str] = []
+        tags = suggest_tags_from_text(source, publication_context, limit=5)
+        if len(tags) >= 5:
+            return tags[:5]
 
-        domain_patterns = [
-            ("Machine Learning", ("machine learning", "hoc may")),
-            ("Deep Learning", ("deep learning", "hoc sau")),
-            ("Trí Tuệ Nhân Tạo", ("artificial intelligence", "tri tue nhan tao", " ai ")),
-            ("Khoa Học Dữ Liệu", ("data science", "du lieu", "data")),
-            ("Lập Trình", ("lap trinh", "programming", "code", "python", "java")),
-            ("Thuật Toán", ("thuat toan", "algorithm")),
-            ("Cơ Sở Dữ Liệu", ("co so du lieu", "database")),
-            ("Kiến Trúc Phần Mềm", ("kien truc phan mem", "software architecture")),
-            ("Công Nghệ Thông Tin", ("cong nghe thong tin", "computer science", "may tinh")),
-            ("Toán Ứng Dụng", ("toan", "xac suat", "thong ke", "linear algebra")),
-        ]
-        padded_source = f" {normalized_source} "
-        for tag, keywords in domain_patterns:
-            if any(keyword in padded_source for keyword in keywords):
-                tags.append(tag)
-
-        for category in re.split(r"[,;/]", context.get("categories", "")):
-            clean_category = category.strip()
-            if 3 <= len(clean_category) <= 50:
-                tags.append(clean_category)
-
-        for title_part in re.split(r"[:;\-–—]", context.get("title", "")):
-            clean_title = title_part.strip()
-            if 3 <= len(clean_title) <= 50 and len(clean_title.split()) <= 5:
-                tags.append(clean_title)
-
-        normalized = self._normalize_text(text)
-        words = re.findall(r"[a-zA-Z0-9_]{3,}|[a-zA-ZÀ-ỹ]{3,}", normalized)
-        stopwords = {
-            "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
-            "you", "your", "not", "can", "will", "book", "chapter", "page",
-            "public", "private", "string", "return", "class", "void", "null", "true", "false", "int", "new",
-            "cac", "cua", "cho", "voi", "mot", "nhung", "duoc", "trong", "khong",
-            "nguoi", "sach", "phan", "chuong",
-        }
-        counts: dict[str, int] = {}
-        for word in words:
-            if word in stopwords or len(word) < 3:
-                continue
-            counts[word] = counts.get(word, 0) + 1
-
-        for word, _count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:8]:
+        backfill = dedupe_quality_tags(
+            [
+                "Nội Dung Chuyên Ngành",
+                "Kiến Thức Nền Tảng",
+                "Phương Pháp Thực Hành",
+                "Ứng Dụng Thực Tế",
+                "Tư Duy Kỹ Thuật",
+            ],
+            publication_context,
+            limit=5,
+        )
+        for tag in backfill:
             if len(tags) >= 5:
                 break
-            if word in {"toan", "cach", "ham", "bai", "bang", "theo", "nay", "thi", "khi", "nhu"}:
-                continue
-            tags.append(word.replace("_", " ").title())
-
-        fallback = ["Lập Trình", "Công Nghệ", "Phần Mềm", "Kỹ Thuật", "Khoa Học Máy Tính"]
-        for tag in fallback:
-            if len(tags) >= 5:
-                break
-            if tag not in tags:
+            if tag.lower() not in {existing.lower() for existing in tags}:
                 tags.append(tag)
-        return list(dict.fromkeys(tags))[:5]
+        return tags[:5]
 
     @staticmethod
     def _calculate_file_hash(pdf_source: Union[Path, str]) -> str:
@@ -369,9 +417,16 @@ class AIEtlPipeline:
         centroid = centroid / centroid_norm
 
         similarities = embeddings @ centroid
-        selected: list[int] = [int(np.argmax(similarities))]
+        selected: list[int] = []
+        for seed_idx in range(min(2, total_chunks)):
+            if seed_idx not in selected:
+                selected.append(seed_idx)
+
+        centroid_idx = int(np.argmax(similarities))
+        if centroid_idx not in selected:
+            selected.append(centroid_idx)
         candidate_indices = set(range(total_chunks))
-        candidate_indices.remove(selected[0])
+        candidate_indices.difference_update(selected)
 
         lambda_weight = 0.65
         while len(selected) < target and candidate_indices:

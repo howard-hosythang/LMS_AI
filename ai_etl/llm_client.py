@@ -9,6 +9,8 @@ from typing import Any
 
 import requests
 
+from .tag_quality import align_english_tags, dedupe_quality_tags, suggest_tags_from_text
+
 
 class LLMResponseError(RuntimeError):
     pass
@@ -165,7 +167,11 @@ class GeminiClient:
             except json.JSONDecodeError as exc:
                 raise LLMResponseError("Model output JSON is malformed") from exc
 
-    def reduce_publication(self, representative_chunks: list[str]) -> dict[str, Any]:
+    def reduce_publication(
+        self,
+        representative_chunks: list[str],
+        publication_context: str = "",
+    ) -> dict[str, Any]:
         models_to_try = [self.cheap_model]
         if self.premium_model and self.premium_model != self.cheap_model:
             models_to_try.append(self.premium_model)
@@ -173,31 +179,151 @@ class GeminiClient:
         last_error: Exception | None = None
         for model in models_to_try:
             try:
-                return self._reduce_once(model, representative_chunks)
+                return self._reduce_once(model, representative_chunks, publication_context)
             except Exception as exc:
                 last_error = exc
 
         raise LLMResponseError(f"Reduce failed on all model routes: {last_error}")
 
-    def _reduce_once(self, model: str, representative_chunks: list[str]) -> dict[str, Any]:
+    def translate_catalog_metadata(
+        self,
+        publication_context: str,
+        ai_summary_vi: str,
+        tags: list[str],
+    ) -> dict[str, Any]:
+        models_to_try = [self.cheap_model]
+        if self.premium_model and self.premium_model != self.cheap_model:
+            models_to_try.append(self.premium_model)
+
+        last_error: Exception | None = None
+        for model in models_to_try:
+            try:
+                return self._translate_catalog_metadata_once(
+                    model,
+                    publication_context,
+                    ai_summary_vi,
+                    tags,
+                )
+            except Exception as exc:
+                last_error = exc
+
+        raise LLMResponseError(f"Translation failed on all model routes: {last_error}")
+
+    def translate_terms(self, terms: list[str], target_language: str = "English") -> list[str]:
+        clean_terms = [str(term).strip() for term in terms if str(term).strip()]
+        if not clean_terms:
+            return []
+
+        prompt = (
+            "You are translating academic library category/tag names.\n"
+            f"Translate each term to {target_language}. Preserve technical acronyms and proper nouns. "
+            "Return exactly one JSON array with the same length and order as the input. "
+            "No markdown, no explanation.\n\n"
+            f"TERMS:\n{json.dumps(clean_terms, ensure_ascii=False)}"
+        )
+        raw = self._call(prompt, model=self.cheap_model)
+        payload = self.extract_json_payload(raw)
+        if not isinstance(payload, list):
+            raise LLMResponseError("Term translation response is not a JSON array")
+        translated = [str(item).strip()[:150] for item in payload]
+        if len(translated) != len(clean_terms):
+            raise LLMResponseError("Term translation response length mismatch")
+        return translated
+
+    def _translate_catalog_metadata_once(
+        self,
+        model: str,
+        publication_context: str,
+        ai_summary_vi: str,
+        tags: list[str],
+    ) -> dict[str, Any]:
+        prompt = (
+            "You are a professional academic library metadata translator.\n"
+            "Translate the catalogue metadata to English for an English UI. Preserve proper nouns, "
+            "book titles that are already English, author names, ISBN-like tokens, technical terms, "
+            "and code/library names. Do not add facts.\n"
+            "Return exactly one JSON object with these fields:\n"
+            "- title: English title or original title if already English.\n"
+            "- subtitle: English subtitle, null if unavailable.\n"
+            "- description: fluent English translation of the description, null if unavailable.\n"
+            "- ai_summary: fluent English translation of the AI content summary.\n"
+            "- tags: array with exactly the same number of tags as input, translated to concise English search tags.\n"
+            "No markdown, no explanation.\n\n"
+            "CATALOG_CONTEXT:\n"
+            f"{publication_context or '(none)'}\n\n"
+            "AI_SUMMARY_VI:\n"
+            f"{ai_summary_vi}\n\n"
+            "TAGS:\n"
+            f"{json.dumps(tags, ensure_ascii=False)}"
+        )
+
+        raw = self._call(prompt, model=model)
+        payload = self.extract_json_payload(raw)
+        if not isinstance(payload, dict):
+            raise LLMResponseError("Translation response is not a JSON object")
+
+        translated_tags = payload.get("tags", [])
+        if not isinstance(translated_tags, list):
+            raise LLMResponseError("Translation response tags must be an array")
+
+        return {
+            "title": self._optional_string(payload.get("title")),
+            "subtitle": self._optional_string(payload.get("subtitle")),
+            "description": self._optional_string(payload.get("description")),
+            "ai_summary": self._optional_string(payload.get("ai_summary")),
+            "tags": [str(tag).strip()[:100] for tag in translated_tags if str(tag).strip()],
+        }
+
+    @staticmethod
+    def _optional_string(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def _reduce_once(
+        self,
+        model: str,
+        representative_chunks: list[str],
+        publication_context: str = "",
+    ) -> dict[str, Any]:
         faculty_values = ", ".join(sorted(FACULTY_TARGETS))
         prompt = (
-            "Bạn là một thủ thư đại học chuyên phân loại sách.\n"
-            "Bạn nhận được metadata và các đoạn văn đại diện đã trích xuất từ PDF.\n"
-            "Hãy bỏ qua nhiễu OCR/PDF như số trang, header/footer, mục lục, công thức rời rạc, "
-            "bảng tài liệu tham khảo, đoạn code lẻ, ký hiệu toán học không đủ ngữ cảnh.\n"
+            "Bạn là thủ thư đại học và chuyên viên biên mục học thuật. Nhiệm vụ là đọc các "
+            "đoạn nội dung trích từ PDF và tạo metadata có thể dùng thật trong thư viện.\n"
+            "QUY TẮC BẮT BUỘC:\n"
+            "1. master_summary chỉ được dựa trên CONTENT_EXCERPTS. Không được ghép Title, Authors, "
+            "Categories hoặc Description thành summary. CATALOG_CONTEXT chỉ dùng để khử nhập nhằng "
+            "và chọn audience/tag khi nội dung PDF đã hỗ trợ nhận định đó.\n"
+            "2. Summary phải nói về nội dung học thuật bên trong tài liệu: khái niệm, phương pháp, "
+            "phạm vi kiến thức, kỹ năng người đọc học được. Không mô tả hệ thống AI, lập chỉ mục, "
+            "metadata, thư viện, file PDF hoặc quy trình xử lý dữ liệu.\n"
+            "3. Nếu excerpt không đủ bằng chứng cho một ý, không đưa ý đó vào summary.\n"
+            "4. Category là nhóm bao phủ rộng; tag là nhãn chủ đề/kỹ năng/công nghệ cụ thể hơn category. "
+            "Không dùng tên khoa, tên category rộng, tên sách, tên tác giả hoặc publisher làm tag.\n"
+            "5. Bỏ qua nhiễu OCR/PDF như số trang, header/footer, mục lục, tài liệu tham khảo, "
+            "copyright, công thức/code rời rạc không đủ ngữ cảnh.\n"
+            "6. Tag bắt buộc viết bằng tiếng Việt, là cụm danh từ tìm kiếm thực tế, 2-4 từ nếu có thể, "
+            "tối đa 50 ký tự, không quá chung như Sách, Giáo Trình, Công Nghệ, Kỹ Thuật, "
+            "Science, Result, Numbers.\n"
+            "7. tags_en là bản tiếng Anh tương ứng từng tag tiếng Việt, cùng thứ tự, dùng thuật ngữ "
+            "người học hay tìm kiếm như Web Development, Machine Learning, Database Normalization. "
+            "Không dịch máy từng chữ nếu thuật ngữ chuyên ngành tiếng Anh đã có cách gọi chuẩn.\n"
             "Hãy tổng hợp thành metadata toàn cục và xuất đúng 1 JSON object duy nhất.\n"
             "JSON bắt buộc có đúng các trường:\n"
-            "- master_summary: tiếng Việt tự nhiên, 100-160 từ, 3-5 câu, nêu đúng chủ đề chính, "
-            "không chép nguyên văn đoạn PDF, không mở đầu bằng Title/Description/Authors/Categories, "
-            "không đưa công thức hoặc ký hiệu toán rời rạc.\n"
+            "- master_summary: tiếng Việt tự nhiên, 120-180 từ, 4-6 câu, nêu đúng nội dung chính, "
+            "phạm vi kiến thức, cách tiếp cận và giá trị học tập; không mở đầu bằng tên sách/tác giả, "
+            "không chép nguyên văn excerpt dài.\n"
             "- audience: đúng 1 mã khoa phù hợp nhất trong danh sách sau, không được mô tả tự do: "
             f"{faculty_values}\n"
-            "- tags: mảng chính xác 5 tag phân loại người dùng nhìn thấy được, mỗi tag 2-4 từ nếu có thể, "
-            "không trùng nhau, không dùng mã khoa, không dùng dấu gạch dưới, không dùng tag quá chung như "
-            "Sách, Giáo trình, Chương.\n"
+            "- tags: mảng chính xác 5 tag tiếng Việt tốt nhất, không trùng nhau; ưu tiên thuật ngữ "
+            "chuyên môn người dùng có khả năng bấm/tìm kiếm, ví dụ Học Máy, Chuẩn Hóa Dữ Liệu, "
+            "Lập Trình Python, Mạch Điện Tử, Quản Lý Dự Án.\n"
+            "- tags_en: mảng chính xác 5 tag tiếng Anh tương ứng 1-1 với tags, không trùng nhau.\n"
             "Không thêm trường khác, không markdown, không giải thích.\n\n"
-            "Danh sách đoạn văn đại diện:\n"
+            "CATALOG_CONTEXT:\n"
+            f"{publication_context or '(không có)'}\n\n"
+            "CONTENT_EXCERPTS:\n"
             f"{json.dumps(representative_chunks, ensure_ascii=False)}"
         )
 
@@ -209,33 +335,77 @@ class GeminiClient:
         master_summary = str(payload.get("master_summary", "")).strip()
         audience = self._coerce_audience(str(payload.get("audience", "")).strip(), master_summary)
         tags = payload.get("tags", [])
+        tags_en = payload.get("tags_en", [])
 
         if not master_summary or not audience or not isinstance(tags, list):
             raise LLMResponseError("Reduce response missing required fields")
 
-        clean_tags = [self._clean_tag(str(tag)) for tag in tags if str(tag).strip()]
-        clean_tags = [tag for tag in clean_tags if tag]
-        clean_tags = list(dict.fromkeys(clean_tags))
+        clean_tags = dedupe_quality_tags(
+            [str(tag) for tag in tags if str(tag).strip()],
+            publication_context,
+            limit=5,
+        )
+
+        for fallback_tag in self._fallback_tags_from_text(
+            " ".join([master_summary, *representative_chunks]),
+            publication_context,
+        ):
+            if len(clean_tags) >= 5:
+                break
+            if fallback_tag.lower() not in {tag.lower() for tag in clean_tags}:
+                clean_tags.append(fallback_tag)
+
+        for fallback_tag in dedupe_quality_tags(
+            [
+                "Kiến Thức Nền Tảng",
+                "Phương Pháp Thực Hành",
+                "Ứng Dụng Thực Tế",
+                "Bài Toán Chuyên Ngành",
+                "Tư Duy Phân Tích",
+            ],
+            publication_context,
+            limit=5,
+        ):
+            if len(clean_tags) >= 5:
+                break
+            if fallback_tag.lower() not in {tag.lower() for tag in clean_tags}:
+                clean_tags.append(fallback_tag)
 
         if len(clean_tags) != 5:
-            raise LLMResponseError("Reduce response must contain exactly 5 unique tags")
+            raise LLMResponseError("Reduce response must contain exactly 5 useful unique tags")
+
+        if self._looks_like_catalog_summary(master_summary):
+            raise LLMResponseError("Reduce summary appears to be catalog metadata, not content")
+
+        clean_tags_en = align_english_tags(
+            clean_tags,
+            [str(tag) for tag in tags_en if str(tag).strip()] if isinstance(tags_en, list) else [],
+        )
 
         return {
             "master_summary": master_summary,
             "audience": audience,
-            "tags": clean_tags,
+            "tags": clean_tags[:5],
+            "tags_en": clean_tags_en,
         }
 
     @staticmethod
-    def _clean_tag(tag: str) -> str:
-        tag = re.sub(r"[_\s]+", " ", tag).strip()
-        tag = re.sub(r"[^\wÀ-ỹ+#.\- ]+", "", tag, flags=re.UNICODE)
-        tag = re.sub(r"\s+", " ", tag).strip(" -_.")
-        if not tag:
-            return ""
-        if tag.isupper() or tag.islower():
-            tag = tag.title()
-        return tag[:50]
+    def _fallback_tags_from_text(text: str, publication_context: str = "") -> list[str]:
+        return suggest_tags_from_text(text, publication_context, limit=5)
+
+    @staticmethod
+    def _looks_like_catalog_summary(summary: str) -> bool:
+        lowered = summary.lower()
+        blocked_phrases = (
+            "hệ thống ai",
+            "lập chỉ mục",
+            "metadata",
+            "thuộc nhóm",
+            "các chủ đề nổi bật gồm",
+            "file pdf",
+            "thư viện",
+        )
+        return any(phrase in lowered for phrase in blocked_phrases)
 
     @staticmethod
     def _coerce_audience(raw_audience: str, summary: str) -> str:

@@ -560,18 +560,6 @@ def _persist_recommendations(
             cur.execute("SET LOCAL statement_timeout = %s", (app_state.settings.statement_timeout_ms,))
             cur.execute(
                 """
-                INSERT INTO ai_engine.recommendation_cache (user_id, publication_ids, strategy, computed_at)
-                VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (user_id)
-                DO UPDATE SET
-                    publication_ids = EXCLUDED.publication_ids,
-                    strategy = EXCLUDED.strategy,
-                    computed_at = NOW()
-                """,
-                (user_id, Json(publication_ids), strategy),
-            )
-            cur.execute(
-                """
                 INSERT INTO public.ai_recommendations (user_id, pub_ids, strategy, computed_at)
                 VALUES (%s, %s, %s, NOW())
                 ON CONFLICT (user_id)

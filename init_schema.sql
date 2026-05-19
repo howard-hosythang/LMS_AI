@@ -3,17 +3,6 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE SCHEMA IF NOT EXISTS ai_engine;
 
-CREATE TABLE IF NOT EXISTS ai_engine.tags (
-    id BIGSERIAL PRIMARY KEY,
-    name VARCHAR(100) UNIQUE NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS ai_engine.publication_tags (
-    publication_id BIGINT REFERENCES public.publications(id) ON DELETE CASCADE,
-    tag_id BIGINT REFERENCES ai_engine.tags(id) ON DELETE CASCADE,
-    PRIMARY KEY (publication_id, tag_id)
-);
-
 CREATE TABLE IF NOT EXISTS ai_engine.publication_vectors (
     id BIGSERIAL PRIMARY KEY,
     publication_id BIGINT REFERENCES public.publications(id) ON DELETE CASCADE,
@@ -58,16 +47,6 @@ ADD COLUMN IF NOT EXISTS chunks_count INT NOT NULL DEFAULT 0;
 ALTER TABLE ai_engine.publication_etl_runs
 ADD COLUMN IF NOT EXISTS vectors_count INT NOT NULL DEFAULT 0;
 
-CREATE TABLE IF NOT EXISTS ai_engine.recommendation_cache (
-    user_id BIGINT PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
-    publication_ids JSONB NOT NULL DEFAULT '[]',
-    strategy VARCHAR(40) NOT NULL DEFAULT 'TRENDING_FALLBACK',
-    computed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_recommendation_cache_computed_at
-ON ai_engine.recommendation_cache(computed_at);
-
 CREATE TABLE IF NOT EXISTS ai_engine.search_logs (
     id BIGSERIAL PRIMARY KEY,
     query_text TEXT NOT NULL,
@@ -84,3 +63,10 @@ CREATE TABLE IF NOT EXISTS public.ai_recommendations (
 
 CREATE INDEX IF NOT EXISTS idx_ai_recommendations_computed_at
 ON public.ai_recommendations(computed_at);
+
+-- Older local AI schemas created a second tag taxonomy under ai_engine.
+-- The backend and frontend read public.tags/public.publication_tags, so keep one
+-- authoritative tag model and drop the unused duplicate tables if they exist.
+DROP TABLE IF EXISTS ai_engine.publication_tags;
+DROP TABLE IF EXISTS ai_engine.tags;
+DROP TABLE IF EXISTS ai_engine.recommendation_cache;
