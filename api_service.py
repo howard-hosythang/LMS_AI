@@ -693,15 +693,25 @@ def process_publication(request: ProcessPublicationRequest) -> ProcessPublicatio
             pdf_path=pdf_source,
             force_reprocess=request.force_reprocess,
         )
+        output = {}
+        if bool(result.get("skipped", False)):
+            with _pooled_connection(app_state) as conn:
+                output = app_state.etl_database.get_publication_ai_outputs(conn, request.publication_id)
         return ProcessPublicationResponse(
             publication_id=request.publication_id,
             status="SUCCESS",
             skipped=bool(result.get("skipped", False)),
             chunks=int(result.get("chunks", 0)),
             vectors=int(result.get("vectors", 0)),
-            summary_generated=bool(result.get("master_summary")),
-            tags=[str(tag) for tag in result.get("tags", [])],
-            ai_target_audience=str(result.get("audience")) if result.get("audience") else None,
+            summary_generated=bool(result.get("master_summary") or output.get("ai_summary")),
+            tags=[str(tag) for tag in (result.get("tags") or output.get("tags") or [])],
+            ai_target_audience=(
+                str(result.get("audience"))
+                if result.get("audience")
+                else str(output.get("ai_target_audience"))
+                if output.get("ai_target_audience")
+                else None
+            ),
         )
     except Exception as exc:
         try:

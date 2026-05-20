@@ -38,7 +38,16 @@ Pipeline ETL cho xử lý PDF sách, tối ưu mạnh cho chi phí và thời gi
 
 ## Cài đặt
 
+Yêu cầu khuyến nghị:
+
+- Python 3.10+
+- PostgreSQL 15+ có extension `pgvector`
+- RabbitMQ nếu chạy Celery worker
+- Gemini API key nếu muốn dùng REDUCE bằng LLM
+
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -152,6 +161,12 @@ Service độc lập cung cấp 2 API cho Backend Java:
 uvicorn api_service:app --host 0.0.0.0 --port 8001 --workers 1
 ```
 
+Kiểm tra service:
+
+```bash
+curl http://localhost:8001/health
+```
+
 ### Biến môi trường cho API
 
 - `AI_API_DB_POOL_MINCONN`
@@ -169,6 +184,12 @@ uvicorn api_service:app --host 0.0.0.0 --port 8001 --workers 1
 - `AI_API_ALS_RETRAIN_INTERVAL_SECONDS`
 
 ## Kiểm thử tích hợp tự động
+
+Chạy toàn bộ test unit/contract:
+
+```bash
+pytest -q
+```
 
 ### 1) Mock ETL flow (giả lập Java đẩy message)
 

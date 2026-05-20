@@ -58,12 +58,14 @@ def _clean_pdf_pages(page_texts: list[str]) -> str:
         page_lines.append(lines)
 
         candidates = lines[:3] + lines[-3:]
+        page_signatures: set[str] = set()
         for line in candidates:
             if _PAGE_NUMBER_PATTERN.match(line):
                 continue
             signature = _line_signature(line)
-            if signature:
+            if signature and signature not in page_signatures:
                 line_counts[signature] = line_counts.get(signature, 0) + 1
+                page_signatures.add(signature)
 
     min_repeats = min(
         max(_HEADER_FOOTER_REPEAT_THRESHOLD, len(page_texts) // 3),
@@ -122,6 +124,13 @@ def extract_pdf_text(pdf_source: Union[Path, str]) -> str:
 
 
 def sliding_window_chunk(text: str, chunk_size: int, overlap: int) -> list[Chunk]:
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if overlap < 0:
+        raise ValueError("overlap must be non-negative")
+    if overlap >= chunk_size:
+        raise ValueError("overlap must be smaller than chunk_size")
+
     if not text:
         return []
 

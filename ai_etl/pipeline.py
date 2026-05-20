@@ -215,7 +215,11 @@ class AIEtlPipeline:
         publication_context: str = "",
     ) -> dict[str, object]:
         try:
-            return self.llm_client.reduce_publication(reduce_inputs, publication_context)
+            result = self.llm_client.reduce_publication(reduce_inputs, publication_context)
+            summary = str(result.get("master_summary") or "")
+            if self._looks_like_catalog_or_low_value_summary(summary):
+                return self._fallback_reduce_publication(reduce_inputs, publication_context)
+            return result
         except Exception:
             return self._fallback_reduce_publication(reduce_inputs, publication_context)
 
@@ -226,14 +230,11 @@ class AIEtlPipeline:
     ) -> dict[str, object]:
         context = self._parse_publication_context(publication_context)
         joined_text = self._clean_summary_source(" ".join(reduce_inputs))
-        fallback_tags = self._extract_fallback_tags(joined_text, context, publication_context)
-        summary = self._extractive_content_summary(joined_text)
+        if not self._has_content_worth_summarizing([joined_text]):
+            return self._catalog_context_reduce_publication(publication_context)
 
-        if not summary:
-            summary = (
-                "Chưa đủ nội dung trích xuất đáng tin cậy để tạo tóm tắt học thuật. "
-                "Cần kiểm tra lại file PDF hoặc chạy lại xử lý với bản tài liệu có văn bản đọc được."
-            )
+        fallback_tags = self._extract_fallback_tags(joined_text, context, publication_context)
+        summary = self._fallback_overview_summary(context, fallback_tags, joined_text)
 
         return {
             "master_summary": summary,
@@ -242,16 +243,118 @@ class AIEtlPipeline:
             "tags_en": align_english_tags(fallback_tags),
         }
 
+    def _catalog_context_reduce_publication(self, publication_context: str = "") -> dict[str, object]:
+        context = self._parse_publication_context(publication_context)
+        title = context.get("title", "Tài liệu")
+        description = context.get("description", "")
+        categories = context.get("categories", "")
+        summary_source = " ".join(part for part in (description, categories, title) if part)
+        tags = self._extract_fallback_tags(summary_source, context, publication_context)
+        audience = self._infer_faculty(summary_source)
+
+        if description:
+            summary = (
+                f"Tài liệu này tập trung vào {description.rstrip('.')}."
+                " Nội dung phù hợp để người đọc nhận diện nhanh phạm vi chủ đề, công nghệ hoặc kỹ năng chính "
+                "trước khi mở tài liệu. Với tài liệu này, mô tả biên mục là nguồn đáng tin cậy nhất hiện có "
+                "để tóm lược mục tiêu học tập."
+            )
+        else:
+            summary = (
+                f"Tài liệu {title} chưa có đủ nội dung văn bản trích xuất đáng tin cậy để tạo tóm tắt chi tiết. "
+                "Hệ thống chỉ xác định được thông tin biên mục và nhóm chủ đề ban đầu, nên người đọc nên mở "
+                "file trực tiếp để đánh giá nội dung trước khi sử dụng."
+            )
+
+        return {
+            "master_summary": self._normalize_summary(summary),
+            "audience": audience,
+            "tags": tags,
+            "tags_en": align_english_tags(tags),
+        }
+
+    def _fallback_overview_summary(
+        self,
+        context: dict[str, str],
+        tags: list[str],
+        content_text: str,
+    ) -> str:
+        description = context.get("description", "")
+        categories = context.get("categories", "")
+        tag_text = ", ".join(tags[:4]) if tags else categories or "các chủ đề chính của tài liệu"
+        source = " ".join([description, categories, content_text])
+        faculty = self._infer_faculty(source)
+        extractive_summary = self._extractive_content_summary(content_text)
+
+        if extractive_summary:
+            base = f"Tài liệu tập trung vào các nội dung chính sau: {extractive_summary}"
+        elif description:
+            description = self._localize_known_description(description.rstrip("."))
+            if self._normalize_text(description).startswith(("tai lieu", "khoa hoc", "giao trinh", "sach")):
+                base = f"{description}."
+            else:
+                base = f"Tài liệu này giới thiệu {description}."
+        else:
+            base = (
+                f"Nội dung tài liệu xoay quanh {tag_text}, với các phần giúp người đọc nhận diện "
+                "khái niệm chính, cách tiếp cận và phạm vi ứng dụng của chủ đề."
+            )
+
+        if faculty == "KHOA_QUAN_LY_CONG_NGHIEP":
+            tail = (
+                " Giá trị chính của tài liệu nằm ở việc hỗ trợ người đọc hiểu vấn đề quản lý, giao tiếp, "
+                "ra quyết định hoặc làm việc với con người trong bối cảnh thực tế. Người đọc có thể dùng "
+                "tài liệu như nguồn tham khảo định hướng trước khi đi sâu vào từng chương."
+            )
+        elif faculty == "KHOA_DIEN_DIEN_TU":
+            tail = (
+                " Tài liệu phù hợp để nắm các nguyên lý kỹ thuật, thành phần hệ thống và cách đo lường "
+                "hoặc thiết kế liên quan đến lĩnh vực điện, điện tử và cơ điện tử. Người đọc có thể dùng "
+                "nó để củng cố nền tảng trước khi áp dụng vào bài tập hoặc dự án."
+            )
+        else:
+            tail = (
+                f" Nội dung có liên quan trực tiếp đến {tag_text}, giúp người đọc xây dựng nền tảng, "
+                "nắm phương pháp thực hành và định hướng ứng dụng kiến thức vào học tập hoặc dự án kỹ thuật."
+            )
+
+        return self._normalize_summary(base + tail)
+
+    @staticmethod
+    def _localize_known_description(description: str) -> str:
+        normalized = description.strip().lower()
+        known = {
+            "provides suggestions for successfully dealing with people both in social and business situations":
+                "Tài liệu đưa ra các gợi ý thực tế để giao tiếp và ứng xử hiệu quả với con người trong bối cảnh xã hội cũng như kinh doanh",
+        }
+        return known.get(normalized, description)
+
     @staticmethod
     def _clean_summary_source(text: str) -> str:
-        text = re.sub(r"(?i)\b(title|subtitle|description|authors|categories):", " ", text)
+        text = re.sub(
+            r"(?i)\b(publication id|title|subtitle|language|publication year|authors|categories|tags|ai summary)\s*:[^.!?\n]*(?:[.!?]\s*)?",
+            " ",
+            text,
+        )
+        text = re.sub(r"(?i)\b(description):", " ", text)
         text = re.sub(r"\.{4,}", " ", text)
         text = re.sub(r"\b\d+\s*/\s*\d+\b", " ", text)
         text = re.sub(r"\bpage\s+\d+\b", " ", text, flags=re.IGNORECASE)
         text = re.sub(r"\s+", " ", text).strip()
         sentences = re.split(r"(?<=[.!?])\s+", text)
         useful = []
-        noise_terms = ("contents", "table of contents", "references", "bibliography", "copyright")
+        noise_terms = (
+            "contents",
+            "table of contents",
+            "references",
+            "bibliography",
+            "copyright",
+            "all rights reserved",
+            "isbn",
+            "preface",
+            "acknowledg",
+            "license",
+        )
         for sentence in sentences:
             lowered = sentence.lower()
             symbol_ratio = sum(1 for ch in sentence if ch in "=∑∫√≤≥<>|{}[]") / max(len(sentence), 1)
@@ -260,7 +363,7 @@ class AIEtlPipeline:
             if symbol_ratio > 0.06:
                 continue
             useful.append(sentence)
-        return " ".join(useful[:8]) or text
+        return " ".join(useful[:10]) or text
 
     @staticmethod
     def _extractive_content_summary(text: str) -> str:
@@ -302,6 +405,73 @@ class AIEtlPipeline:
         return summary
 
     @staticmethod
+    def _normalize_summary(text: str) -> str:
+        return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _looks_like_catalog_or_low_value_summary(cls, summary: str) -> bool:
+        lowered = summary.lower()
+        blocked = (
+            "publication id:",
+            "language:",
+            "publication year:",
+            "authors:",
+            "categories:",
+            "tags:",
+            "ai summary:",
+            "metadata",
+            "lập chỉ mục",
+            "file pdf",
+            "hệ thống ai",
+        )
+        if any(term in lowered for term in blocked):
+            return True
+        return False
+
+    @classmethod
+    def _has_content_worth_summarizing(cls, texts: list[str]) -> bool:
+        cleaned = cls._normalize_summary(" ".join(texts))
+        if len(cleaned) < 100:
+            return False
+
+        lowered = cleaned.lower()
+        metadata_hits = sum(
+            term in lowered
+            for term in (
+                "publication id:",
+                "title:",
+                "language:",
+                "publication year:",
+                "authors:",
+                "categories:",
+                "tags:",
+                "description:",
+                "ai summary:",
+            )
+        )
+        if metadata_hits >= 2:
+            return False
+
+        front_matter_hits = sum(
+            term in lowered
+            for term in (
+                "copyright",
+                "all rights reserved",
+                "isbn",
+                "table of contents",
+                "contents",
+                "preface",
+                "acknowledg",
+                "license",
+            )
+        )
+        if front_matter_hits >= 3:
+            return False
+
+        alpha_ratio = sum(ch.isalpha() for ch in cleaned) / max(len(cleaned), 1)
+        return alpha_ratio >= 0.55
+
+    @staticmethod
     def _parse_publication_context(text: str) -> dict[str, str]:
         context: dict[str, str] = {}
         for line in text.splitlines():
@@ -329,7 +499,7 @@ class AIEtlPipeline:
             ("KHOA_KY_THUAT_HOA_HOC", ("hoa hoc", "chemical", "chemistry")),
             ("KHOA_KY_THUAT_XAY_DUNG", ("xay dung", "construction", "civil")),
             ("KHOA_KY_THUAT_GIAO_THONG", ("giao thong", "transport", "traffic")),
-            ("KHOA_QUAN_LY_CONG_NGHIEP", ("quan ly", "management", "industrial")),
+            ("KHOA_QUAN_LY_CONG_NGHIEP", ("quan ly", "management", "industrial", "business", "economics", "leadership", "people skills")),
             ("KHOA_MOI_TRUONG_VA_TAI_NGUYEN", ("moi truong", "environment", "resource")),
             ("KHOA_CONG_NGHE_VAT_LIEU", ("vat lieu", "material")),
             ("KHOA_KHOA_HOC_UNG_DUNG", ("toan", "physics", "applied", "ung dung")),
@@ -406,6 +576,14 @@ class AIEtlPipeline:
         if not chunks:
             return []
 
+        eligible_indices = [
+            index for index, chunk in enumerate(chunks)
+            if self._has_content_worth_summarizing([self._clean_summary_source(chunk.text)])
+        ]
+        if len(eligible_indices) >= min(3, len(chunks)):
+            chunks = [chunks[index] for index in eligible_indices]
+            vectors = [vectors[index] for index in eligible_indices]
+
         embeddings = np.array(vectors, dtype=np.float32)
         total_chunks = len(chunks)
         target = min(max_chunks, max(8, int(math.sqrt(total_chunks) * 2)), total_chunks)
@@ -418,13 +596,18 @@ class AIEtlPipeline:
 
         similarities = embeddings @ centroid
         selected: list[int] = []
-        for seed_idx in range(min(2, total_chunks)):
-            if seed_idx not in selected:
-                selected.append(seed_idx)
+        if total_chunks > 0:
+            selected.append(0)
 
         centroid_idx = int(np.argmax(similarities))
         if centroid_idx not in selected:
             selected.append(centroid_idx)
+        elif len(selected) < target and total_chunks > 1:
+            for candidate_idx in np.argsort(similarities)[::-1]:
+                candidate_idx = int(candidate_idx)
+                if candidate_idx not in selected:
+                    selected.append(candidate_idx)
+                    break
         candidate_indices = set(range(total_chunks))
         candidate_indices.difference_update(selected)
 

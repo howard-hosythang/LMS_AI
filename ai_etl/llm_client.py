@@ -9,7 +9,14 @@ from typing import Any
 
 import requests
 
-from .tag_quality import align_english_tags, dedupe_quality_tags, suggest_tags_from_text
+from .tag_quality import (
+    align_english_tags,
+    clean_ai_tag,
+    dedupe_quality_tags,
+    is_low_quality_tag,
+    normalize_key,
+    suggest_tags_from_text,
+)
 
 
 class LLMResponseError(RuntimeError):
@@ -340,11 +347,25 @@ class GeminiClient:
         if not master_summary or not audience or not isinstance(tags, list):
             raise LLMResponseError("Reduce response missing required fields")
 
-        clean_tags = dedupe_quality_tags(
-            [str(tag) for tag in tags if str(tag).strip()],
-            publication_context,
-            limit=5,
-        )
+        raw_tags = [str(tag) for tag in tags if str(tag).strip()]
+        raw_tags_en = [str(tag) for tag in tags_en if str(tag).strip()] if isinstance(tags_en, list) else []
+        clean_tags: list[str] = []
+        clean_tags_en_candidates: list[str] = []
+        seen_tag_keys: set[str] = set()
+        for index, raw_tag in enumerate(raw_tags):
+            clean_tag = clean_ai_tag(raw_tag)
+            tag_key = normalize_key(clean_tag)
+            if (
+                not clean_tag
+                or tag_key in seen_tag_keys
+                or is_low_quality_tag(clean_tag, publication_context)
+            ):
+                continue
+            clean_tags.append(clean_tag)
+            clean_tags_en_candidates.append(raw_tags_en[index] if index < len(raw_tags_en) else "")
+            seen_tag_keys.add(tag_key)
+            if len(clean_tags) >= 5:
+                break
 
         for fallback_tag in self._fallback_tags_from_text(
             " ".join([master_summary, *representative_chunks]),
@@ -354,6 +375,7 @@ class GeminiClient:
                 break
             if fallback_tag.lower() not in {tag.lower() for tag in clean_tags}:
                 clean_tags.append(fallback_tag)
+                clean_tags_en_candidates.append("")
 
         for fallback_tag in dedupe_quality_tags(
             [
@@ -370,6 +392,7 @@ class GeminiClient:
                 break
             if fallback_tag.lower() not in {tag.lower() for tag in clean_tags}:
                 clean_tags.append(fallback_tag)
+                clean_tags_en_candidates.append("")
 
         if len(clean_tags) != 5:
             raise LLMResponseError("Reduce response must contain exactly 5 useful unique tags")
@@ -379,7 +402,7 @@ class GeminiClient:
 
         clean_tags_en = align_english_tags(
             clean_tags,
-            [str(tag) for tag in tags_en if str(tag).strip()] if isinstance(tags_en, list) else [],
+            clean_tags_en_candidates,
         )
 
         return {
@@ -397,6 +420,13 @@ class GeminiClient:
     def _looks_like_catalog_summary(summary: str) -> bool:
         lowered = summary.lower()
         blocked_phrases = (
+            "publication id:",
+            "language:",
+            "publication year:",
+            "authors:",
+            "categories:",
+            "tags:",
+            "ai summary:",
             "hệ thống ai",
             "lập chỉ mục",
             "metadata",

@@ -272,6 +272,35 @@ class Database:
             row = cur.fetchone()
             return bool(row and row[0] and row[1] and row[2])
 
+    def get_publication_ai_outputs(self, conn: PGConnection, publication_id: int) -> dict[str, object]:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.ai_summary,
+                    p.ai_target_audience,
+                    COALESCE(
+                        ARRAY_AGG(DISTINCT t.name ORDER BY t.name)
+                        FILTER (WHERE t.id IS NOT NULL),
+                        ARRAY[]::text[]
+                    ) AS tags
+                FROM public.publications p
+                LEFT JOIN public.publication_tags pt ON pt.publication_id = p.id
+                LEFT JOIN public.tags t ON t.id = pt.tag_id
+                WHERE p.id = %s
+                GROUP BY p.id
+                """,
+                (publication_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {"ai_summary": None, "ai_target_audience": None, "tags": []}
+            return {
+                "ai_summary": row[0],
+                "ai_target_audience": row[1],
+                "tags": [str(tag) for tag in (row[2] or [])],
+            }
+
     def bulk_insert_vectors(
         self,
         conn: PGConnection,
