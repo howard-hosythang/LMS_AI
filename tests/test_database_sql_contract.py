@@ -38,7 +38,8 @@ def test_clear_previous_ai_data_deletes_vectors_and_public_tag_links() -> None:
     joined_sql = "\n".join(sql for sql, _params in cursor.statements)
     assert "DELETE FROM ai_engine.publication_vectors" in joined_sql
     assert "DELETE FROM public.publication_tags" in joined_sql
-    assert [params for _sql, params in cursor.statements] == [(9,), (9,)]
+    assert "SET ai_summary = NULL" in joined_sql
+    assert [params for _sql, params in cursor.statements] == [(9,), (9,), (9,)]
 
 
 def test_publication_has_ai_outputs_requires_vectors_tags_summary_and_audience() -> None:

@@ -339,6 +339,85 @@ def _content_based_recommendations(
             return [int(row[0]) for row in cur.fetchall()]
 
 
+def _metadata_based_recommendations(
+    app_state: AppState,
+    user_id: int,
+    limit: int,
+    exclude_publication_ids: list[int] | None = None,
+) -> list[int]:
+    excluded_ids = set(exclude_publication_ids or [])
+
+    with _pooled_connection(app_state) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = %s", (app_state.settings.statement_timeout_ms,))
+            cur.execute(
+                """
+                SELECT DISTINCT publication_id
+                FROM public.user_interactions
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            interacted_ids = {int(row[0]) for row in cur.fetchall()}
+            excluded_ids.update(interacted_ids)
+            if not interacted_ids:
+                return []
+
+            excluded_list = list(excluded_ids) or [-1]
+            cur.execute(
+                """
+                WITH user_publications AS (
+                    SELECT UNNEST(%s::bigint[]) AS publication_id
+                ),
+                user_categories AS (
+                    SELECT DISTINCT pc.category_id
+                    FROM public.publication_categories pc
+                    JOIN user_publications up ON up.publication_id = pc.publication_id
+                ),
+                user_tags AS (
+                    SELECT DISTINCT pt.tag_id
+                    FROM public.publication_tags pt
+                    JOIN user_publications up ON up.publication_id = pt.publication_id
+                ),
+                user_authors AS (
+                    SELECT DISTINCT pa.author_id
+                    FROM public.publication_authors pa
+                    JOIN user_publications up ON up.publication_id = pa.publication_id
+                )
+                SELECT
+                    p.id,
+                    COUNT(DISTINCT pc.category_id) * 8
+                    + COUNT(DISTINCT pt.tag_id) * 6
+                    + COUNT(DISTINCT pa.author_id) * 3 AS score
+                FROM public.publications p
+                LEFT JOIN public.publication_categories pc
+                    ON pc.publication_id = p.id
+                   AND pc.category_id IN (SELECT category_id FROM user_categories)
+                LEFT JOIN public.publication_tags pt
+                    ON pt.publication_id = p.id
+                   AND pt.tag_id IN (SELECT tag_id FROM user_tags)
+                LEFT JOIN public.publication_authors pa
+                    ON pa.publication_id = p.id
+                   AND pa.author_id IN (SELECT author_id FROM user_authors)
+                WHERE NOT (p.id = ANY(%s))
+                  AND EXISTS (
+                      SELECT 1
+                      FROM public.items i
+                      WHERE i.publication_id = p.id
+                        AND i.status = 'AVAILABLE'
+                  )
+                GROUP BY p.id
+                HAVING COUNT(DISTINCT pc.category_id) > 0
+                    OR COUNT(DISTINCT pt.tag_id) > 0
+                    OR COUNT(DISTINCT pa.author_id) > 0
+                ORDER BY score DESC, p.created_at DESC NULLS LAST, p.id ASC
+                LIMIT %s
+                """,
+                (list(interacted_ids), excluded_list, limit),
+            )
+            return [int(row[0]) for row in cur.fetchall()]
+
+
 def _merge_ranked_unique(primary: list[int], secondary: list[int], limit: int) -> list[int]:
     merged: list[int] = []
     seen: set[int] = set()
@@ -451,96 +530,142 @@ def _meaningful_query_terms(query_text: str) -> list[str]:
     ]
 
 
+_QUERY_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    "tri tue nhan tao": ("artificial intelligence", "ai"),
+    "hoc may": ("machine learning",),
+    "hoc sau": ("deep learning",),
+    "mang no ron": ("neural network", "neural networks"),
+    "xu ly ngon ngu tu nhien": ("natural language processing", "nlp"),
+    "thi giac may tinh": ("computer vision",),
+    "co so du lieu": ("database", "databases"),
+    "lap trinh web": ("web development",),
+    "thuat toan": ("algorithm", "algorithms"),
+    "cau truc du lieu": ("data structures",),
+}
+
+
+def _expanded_search_phrases(query_text: str) -> list[str]:
+    query = _normalize_search_text(query_text)
+    phrases = [query] if query else []
+    for source, expansions in _QUERY_EXPANSIONS.items():
+        if source in query:
+            phrases.extend(_normalize_search_text(expansion) for expansion in expansions)
+    if query in {"ai", "a i"}:
+        phrases.extend(["artificial intelligence", "tri tue nhan tao"])
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for phrase in phrases:
+        phrase = _normalize_search_text(phrase)
+        if phrase and phrase not in seen:
+            result.append(phrase)
+            seen.add(phrase)
+    return result
+
+
+def _metadata_relevance_score(query_text: str, fields: dict[str, str]) -> int:
+    phrases = _expanded_search_phrases(query_text)
+    if not phrases:
+        return 0
+
+    title = _normalize_search_text(fields.get("title", ""))
+    subtitle = _normalize_search_text(fields.get("subtitle", ""))
+    description = _normalize_search_text(fields.get("description", ""))
+    summary = _normalize_search_text(fields.get("summary", ""))
+    authors = _normalize_search_text(fields.get("authors", ""))
+    categories = _normalize_search_text(fields.get("categories", ""))
+    tags = _normalize_search_text(fields.get("tags", ""))
+
+    score = 0
+    for phrase in phrases:
+        if phrase in title:
+            score += 90 if phrase == title else 80
+        if phrase in subtitle:
+            score += 45
+        if phrase in categories:
+            score += 42
+        if phrase in tags:
+            score += 38
+        if phrase in description:
+            score += 22
+        if phrase in summary:
+            score += 16
+        if phrase in authors:
+            score += 8
+
+    query_terms = set(_meaningful_query_terms(query_text))
+    for phrase in phrases[1:]:
+        query_terms.update(term for term in phrase.split() if len(term) >= 3)
+    if not query_terms:
+        return score
+
+    field_weights = (
+        (title, 10),
+        (subtitle, 6),
+        (categories, 6),
+        (tags, 5),
+        (description, 3),
+        (summary, 2),
+        (authors, 1),
+    )
+    for field_text, weight in field_weights:
+        terms = set(_tokenize_search_text(field_text))
+        score += weight * len(query_terms.intersection(terms))
+
+    return score
+
+
 def _keyword_fallback_search(app_state: AppState, query_text: str, limit: int) -> list[int]:
-    like_query = f"%{query_text.strip()}%"
+    phrases = _expanded_search_phrases(query_text)
     with _pooled_connection(app_state) as conn:
         with conn.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout = %s", (app_state.settings.statement_timeout_ms,))
             cur.execute(
                 """
-                SELECT p.id
-                FROM public.publications p
-                LEFT JOIN public.publication_authors pa ON pa.publication_id = p.id
-                LEFT JOIN public.authors a ON a.id = pa.author_id
-                LEFT JOIN public.publication_categories pc ON pc.publication_id = p.id
-                LEFT JOIN public.categories c ON c.id = pc.category_id
-                WHERE p.title ILIKE %s
-                   OR p.subtitle ILIKE %s
-                   OR p.description ILIKE %s
-                   OR p.ai_summary ILIKE %s
-                   OR a.name ILIKE %s
-                   OR c.name ILIKE %s
-                GROUP BY p.id
-                ORDER BY
-                    CASE
-                        WHEN p.title ILIKE %s THEN 0
-                        WHEN p.subtitle ILIKE %s THEN 1
-                        WHEN p.description ILIKE %s OR p.ai_summary ILIKE %s THEN 2
-                        WHEN BOOL_OR(a.name ILIKE %s) OR BOOL_OR(c.name ILIKE %s) THEN 3
-                        ELSE 4
-                    END,
-                    p.created_at DESC NULLS LAST,
-                    p.id ASC
-                LIMIT %s
-                """,
-                (
-                    like_query,
-                    like_query,
-                    like_query,
-                    like_query,
-                    like_query,
-                    like_query,
-                    like_query,
-                    like_query,
-                    like_query,
-                    like_query,
-                    like_query,
-                    like_query,
-                    limit,
-                ),
-            )
-            rows = cur.fetchall()
-            if rows:
-                return [int(row[0]) for row in rows]
-
-            cur.execute(
-                """
                 SELECT
                     p.id,
-                    CONCAT_WS(
-                        ' ',
-                        p.title,
-                        p.subtitle,
-                        p.description,
-                        p.ai_summary,
-                        STRING_AGG(DISTINCT a.name, ' '),
-                        STRING_AGG(DISTINCT c.name, ' ')
-                    ) AS searchable_text
+                    p.title,
+                    p.subtitle,
+                    p.description,
+                    p.ai_summary,
+                    STRING_AGG(DISTINCT a.name, ' ') AS authors,
+                    STRING_AGG(DISTINCT c.name, ' ') AS categories,
+                    STRING_AGG(DISTINCT t.name, ' ') AS tags
                 FROM public.publications p
                 LEFT JOIN public.publication_authors pa ON pa.publication_id = p.id
                 LEFT JOIN public.authors a ON a.id = pa.author_id
                 LEFT JOIN public.publication_categories pc ON pc.publication_id = p.id
                 LEFT JOIN public.categories c ON c.id = pc.category_id
+                LEFT JOIN public.publication_tags pt ON pt.publication_id = p.id
+                LEFT JOIN public.tags t ON t.id = pt.tag_id
                 GROUP BY p.id
                 ORDER BY p.created_at DESC NULLS LAST, p.id ASC
-                LIMIT 500
+                LIMIT 1000
                 """
             )
-            candidates = [(int(row[0]), str(row[1] or "")) for row in cur.fetchall()]
+            rows = cur.fetchall()
 
-    query_terms = _meaningful_query_terms(query_text)
-    if not query_terms:
+    if not phrases:
         return []
 
-    scored: list[tuple[int, int]] = []
-    for publication_id, searchable_text in candidates:
-        searchable_terms = set(_tokenize_search_text(searchable_text))
-        score = sum(1 for term in query_terms if term in searchable_terms)
-        if score == len(query_terms):
-            scored.append((publication_id, score))
+    scored: list[tuple[int, int, int]] = []
+    for rank, row in enumerate(rows):
+        publication_id = int(row[0])
+        fields = {
+            "title": str(row[1] or ""),
+            "subtitle": str(row[2] or ""),
+            "description": str(row[3] or ""),
+            "summary": str(row[4] or ""),
+            "authors": str(row[5] or ""),
+            "categories": str(row[6] or ""),
+            "tags": str(row[7] or ""),
+        }
+        score = _metadata_relevance_score(query_text, fields)
+        if score > 0:
+            scored.append((publication_id, score, rank))
 
-    scored.sort(key=lambda item: (-item[1], item[0]))
-    return [publication_id for publication_id, _score in scored[:limit]]
+    scored.sort(key=lambda item: (-item[1], item[2], item[0]))
+    return [publication_id for publication_id, _score, _rank in scored[:limit]]
 
 
 def _prefer_keyword_first(query_text: str) -> bool:
@@ -801,6 +926,19 @@ async def recommendations(request: RecommendationRequest) -> RecommendationRespo
         als_ids = _filter_available_books(app_state, raw_recommendations, limit) if raw_recommendations else []
         publication_ids = _merge_ranked_unique(cbf_ids, als_ids, limit)
 
+        metadata_ids: list[int] = []
+        if len(publication_ids) < limit:
+            try:
+                metadata_ids = _metadata_based_recommendations(
+                    app_state,
+                    request.user_id,
+                    limit,
+                    exclude_publication_ids=publication_ids,
+                )
+            except Exception:
+                metadata_ids = []
+            publication_ids = _merge_ranked_unique(publication_ids, metadata_ids, limit)
+
         if len(publication_ids) < limit:
             trending_ids = _get_trending_books(app_state, limit)
             publication_ids = _merge_ranked_unique(publication_ids, trending_ids, limit)
@@ -815,6 +953,8 @@ async def recommendations(request: RecommendationRequest) -> RecommendationRespo
             strategy = "REALTIME_CONTENT_BASED"
         elif als_ids:
             strategy = "ALS_HYBRID"
+        elif metadata_ids:
+            strategy = "METADATA_BASED"
         else:
             strategy = "TRENDING_FALLBACK"
 

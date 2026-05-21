@@ -40,8 +40,41 @@ def test_vector_to_pg_literal_uses_fixed_precision_for_pgvector_cast() -> None:
 
 def test_query_tokenization_is_accent_insensitive_and_filters_short_terms() -> None:
     assert api_service._meaningful_query_terms("Lập trình AI, C++ và Web") == ["lap", "trinh", "web"]
+    assert api_service._expanded_search_phrases("Trí tuệ nhân tạo") == [
+        "tri tue nhan tao",
+        "artificial intelligence",
+        "ai",
+    ]
     assert api_service._prefer_keyword_first("web development") is True
     assert api_service._prefer_keyword_first("advanced neural information retrieval systems") is False
+
+
+def test_metadata_relevance_ranks_exact_translated_title_above_broad_ai_category() -> None:
+    query = "Trí Tuệ Nhân Tạo"
+    aima_score = api_service._metadata_relevance_score(
+        query,
+        {
+            "title": "Artificial Intelligence: A Modern Approach",
+            "authors": "Peter Norvig, Stuart Russell",
+            "categories": "Trí Tuệ Nhân Tạo",
+            "description": "A comprehensive AI textbook.",
+            "summary": "",
+            "tags": "",
+        },
+    )
+    machine_learning_score = api_service._metadata_relevance_score(
+        query,
+        {
+            "title": "Machine Learning cơ bản",
+            "authors": "Vũ Khắc Tiệp",
+            "categories": "Trí Tuệ Nhân Tạo",
+            "description": "Machine learning foundations.",
+            "summary": "",
+            "tags": "",
+        },
+    )
+
+    assert aima_score > machine_learning_score
 
 
 def test_merge_ranked_unique_preserves_rank_and_limit() -> None:
@@ -78,6 +111,40 @@ def test_semantic_search_prefers_semantic_chunk_order_for_long_queries(monkeypat
     )
 
     assert response.publication_ids == [30, 31, 40, 41, 1]
+
+
+def test_semantic_search_caps_requested_limit_to_configured_max(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        default_search_limit=10,
+        max_search_limit=3,
+        default_recommend_limit=10,
+        max_recommend_limit=50,
+    )
+    _install_app_state(settings)
+    downstream_limits: list[int] = []
+
+    monkeypatch.setattr(api_service, "_has_publication_vectors", lambda _state: True)
+    monkeypatch.setattr(
+        api_service,
+        "_semantic_search_publication_ids",
+        lambda _state, _vector, limit: downstream_limits.append(limit) or [8, 9, 10, 11],
+    )
+    monkeypatch.setattr(
+        api_service,
+        "_keyword_fallback_search",
+        lambda _state, _query, limit: downstream_limits.append(limit) or [1, 2, 3, 4],
+    )
+    monkeypatch.setattr(
+        api_service,
+        "_chunk_keyword_search",
+        lambda _state, _query, limit: downstream_limits.append(limit) or [5, 6, 7, 8],
+    )
+    monkeypatch.setattr(api_service, "_log_search", lambda *_args: None)
+
+    response = api_service.semantic_search(api_service.SemanticSearchRequest(query_text="web", limit=100))
+
+    assert downstream_limits == [3, 3, 3]
+    assert response.publication_ids == [1, 2, 3]
 
 
 def test_recommendations_use_trending_fallback_for_cold_start_users(monkeypatch) -> None:
@@ -118,3 +185,28 @@ def test_recommendations_merge_cbf_als_and_trending_for_warm_users(monkeypatch) 
     assert response.publication_ids == [20, 21, 30, 31, 40]
     assert response.strategy == "REALTIME_CBF_ALS_HYBRID"
     assert persisted == [(99, [20, 21, 30, 31, 40], "REALTIME_CBF_ALS_HYBRID")]
+
+
+def test_recommendations_fall_back_when_als_recommender_fails(monkeypatch) -> None:
+    class FailingRecommender:
+        async def recommend_for_user(self, user_id: int, limit: int) -> list[int]:
+            raise RuntimeError("ALS model unavailable")
+
+    state = _install_app_state()
+    state.recommender = FailingRecommender()
+    persisted: list[tuple[int, list[int], str]] = []
+
+    monkeypatch.setattr(api_service, "_has_user_interactions", lambda _state, user_id: True)
+    monkeypatch.setattr(api_service, "_content_based_recommendations", lambda _state, user_id, limit: [20])
+    monkeypatch.setattr(api_service, "_get_trending_books", lambda _state, limit: [30, 31, 32][:limit])
+    monkeypatch.setattr(
+        api_service,
+        "_persist_recommendations",
+        lambda _state, user_id, ids, strategy: persisted.append((user_id, ids, strategy)),
+    )
+
+    response = asyncio.run(api_service.recommendations(api_service.RecommendationRequest(user_id=99, limit=3)))
+
+    assert response.publication_ids == [20, 30, 31]
+    assert response.strategy == "REALTIME_CONTENT_BASED"
+    assert persisted == [(99, [20, 30, 31], "REALTIME_CONTENT_BASED")]

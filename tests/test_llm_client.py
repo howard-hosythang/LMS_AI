@@ -55,7 +55,10 @@ def test_reduce_once_filters_tags_aligns_english_aliases_and_coerces_audience() 
             "master_summary": (
                 "Tài liệu trình bày thiết kế cơ sở dữ liệu quan hệ, chuẩn hóa lược đồ, truy vấn SQL, "
                 "chỉ mục và giao dịch. Nội dung tập trung vào cách xây dựng mô hình dữ liệu nhất quán, "
-                "đánh giá ràng buộc toàn vẹn và tối ưu truy vấn cho các hệ thống phần mềm."
+                "đánh giá ràng buộc toàn vẹn và tối ưu truy vấn cho các hệ thống phần mềm. "
+                "Các phần nội dung cũng chỉ ra vai trò của giao dịch, khôi phục và tính nhất quán khi "
+                "nhiều người dùng cùng thao tác trên dữ liệu. Người đọc có thể dùng tài liệu để nắm "
+                "nền tảng thiết kế, vận hành và phân tích hiệu năng cơ sở dữ liệu."
             ),
             "audience": "computer science",
             "tags": ["Công Nghệ", "SQL", "Chuẩn Hóa Dữ Liệu", "Database System Concepts"],
@@ -76,16 +79,14 @@ def test_reduce_once_filters_tags_aligns_english_aliases_and_coerces_audience() 
     assert result["tags"] == [
         "SQL",
         "Chuẩn Hóa Dữ Liệu",
-        "Khoa Học Dữ Liệu",
+        "Mô Hình Dữ Liệu",
         "Xử Lý Truy Vấn",
-        "Kiến Thức Nền Tảng",
     ]
     assert result["tags_en"] == [
         "SQL",
         "Database Normalization",
-        "Data Science",
+        "Data Modeling",
         "Query Processing",
-        "Foundational Knowledge",
     ]
 
 

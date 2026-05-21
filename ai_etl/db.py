@@ -61,6 +61,15 @@ class Database:
                 "DELETE FROM public.publication_tags WHERE publication_id = %s",
                 (publication_id,),
             )
+            cur.execute(
+                """
+                UPDATE public.publications
+                SET ai_summary = NULL,
+                    ai_target_audience = NULL
+                WHERE id = %s
+                """,
+                (publication_id,),
+            )
 
     def ensure_etl_metadata_table(self, conn: PGConnection) -> None:
         with conn.cursor() as cur:

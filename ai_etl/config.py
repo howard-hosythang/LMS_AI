@@ -23,6 +23,11 @@ class Settings:
     reduce_total_chars_budget: int
     enable_hash_skip: bool
     enable_english_translation: bool
+    enable_ocr_fallback: bool
+    ocr_max_pages: int
+    ocr_dpi: int
+    ocr_language: str
+    ocr_min_text_chars: int
     llm_timeout_seconds: int
     llm_retry_attempts: int
     webhook_timeout_seconds: int
@@ -86,6 +91,11 @@ def load_settings() -> Settings:
             os.getenv("AI_ETL_ENABLE_ENGLISH_TRANSLATION", "false"),
             False,
         ),
+        enable_ocr_fallback=_parse_bool(os.getenv("AI_ETL_ENABLE_OCR_FALLBACK", "true"), True),
+        ocr_max_pages=max(0, int(os.getenv("AI_ETL_OCR_MAX_PAGES", "32"))),
+        ocr_dpi=max(72, int(os.getenv("AI_ETL_OCR_DPI", "160"))),
+        ocr_language=os.getenv("AI_ETL_OCR_LANGUAGE", "eng+vie").strip() or "eng",
+        ocr_min_text_chars=max(0, int(os.getenv("AI_ETL_OCR_MIN_TEXT_CHARS", "500"))),
         llm_timeout_seconds=int(os.getenv("AI_ETL_LLM_TIMEOUT_SECONDS", "30")),
         llm_retry_attempts=int(os.getenv("AI_ETL_LLM_RETRY_ATTEMPTS", "2")),
         webhook_timeout_seconds=int(os.getenv("AI_ETL_WEBHOOK_TIMEOUT_SECONDS", "8")),

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from ai_etl.pdf_processing import _clean_pdf_pages, sanitize_text, sliding_window_chunk
+from ai_etl.pdf_processing import (
+    _clean_pdf_pages,
+    _has_usable_ocr_text,
+    _select_ocr_page_indices,
+    sanitize_text,
+    sliding_window_chunk,
+)
 
 
 def test_clean_pdf_pages_removes_repeated_page_furniture_and_noise() -> None:
@@ -43,3 +49,18 @@ def test_sliding_window_chunk_rejects_invalid_window_parameters() -> None:
 
     with pytest.raises(ValueError, match="chunk_size must be positive"):
         sliding_window_chunk("abc", chunk_size=0, overlap=0)
+
+
+def test_ocr_page_sampling_covers_opening_middle_and_end() -> None:
+    indices = _select_ocr_page_indices(page_count=100, max_pages=12)
+
+    assert indices[:4] == [0, 1, 2, 3]
+    assert 99 in indices
+    assert len(indices) == 12
+    assert indices == sorted(set(indices))
+
+
+def test_ocr_text_quality_requires_enough_alpha_text() -> None:
+    assert _has_usable_ocr_text("Algorithms and data structures " * 30, min_text_chars=200)
+    assert not _has_usable_ocr_text("12345 !!! " * 30, min_text_chars=100)
+    assert not _has_usable_ocr_text("short text", min_text_chars=100)

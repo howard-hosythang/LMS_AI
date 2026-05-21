@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     postgresql-client \
     libpq-dev \
     poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-vie \
     curl \
     && rm -rf /var/lib/apt/lists/*
 

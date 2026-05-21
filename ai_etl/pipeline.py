@@ -14,7 +14,7 @@ from .config import Settings
 from .db import Database
 from .embedding_client import EmbeddingClient
 from .llm_client import GeminiClient
-from .pdf_processing import Chunk, extract_pdf_text, sliding_window_chunk
+from .pdf_processing import Chunk, extract_pdf_text, sliding_window_chunk, strip_legal_and_publisher_boilerplate, strip_public_domain_boilerplate
 from .tag_quality import align_english_tags, dedupe_quality_tags, suggest_tags_from_text
 
 
@@ -58,14 +58,24 @@ class AIEtlPipeline:
         conn.commit()
 
         try:
-            full_text = extract_pdf_text(pdf_path)
+            full_text = extract_pdf_text(
+                pdf_path,
+                enable_ocr_fallback=self.settings.enable_ocr_fallback,
+                ocr_max_pages=self.settings.ocr_max_pages,
+                ocr_dpi=self.settings.ocr_dpi,
+                ocr_language=self.settings.ocr_language,
+                ocr_min_text_chars=self.settings.ocr_min_text_chars,
+            )
             chunks = sliding_window_chunk(
                 text=full_text,
                 chunk_size=self.settings.chunk_size,
                 overlap=self.settings.chunk_overlap,
             )
             if not chunks:
-                raise ValueError("No valid text chunks extracted from PDF")
+                raise ValueError(
+                    "PDF has no usable extractable text. If this is a scanned/image-only PDF, "
+                    "OCR did not produce enough reliable text; upload a text-based PDF or improve OCR quality."
+                )
 
             if self.settings.enable_hash_skip and not force_reprocess:
                 existing_hash = self.database.get_publication_file_hash(conn, publication_id)
@@ -219,6 +229,8 @@ class AIEtlPipeline:
             summary = str(result.get("master_summary") or "")
             if self._looks_like_catalog_or_low_value_summary(summary):
                 return self._fallback_reduce_publication(reduce_inputs, publication_context)
+            if self._is_literature_context(publication_context) and self._has_technical_generic_tags(result.get("tags", [])):
+                return self._fallback_reduce_publication(reduce_inputs, publication_context)
             return result
         except Exception:
             return self._fallback_reduce_publication(reduce_inputs, publication_context)
@@ -235,10 +247,13 @@ class AIEtlPipeline:
 
         fallback_tags = self._extract_fallback_tags(joined_text, context, publication_context)
         summary = self._fallback_overview_summary(context, fallback_tags, joined_text)
+        audience = self._infer_faculty(" ".join([joined_text, publication_context]))
+        if self._is_literature_context(publication_context):
+            audience = "TOAN_BO_SINH_VIEN_BKU"
 
         return {
             "master_summary": summary,
-            "audience": self._infer_faculty(" ".join([joined_text, publication_context])),
+            "audience": audience,
             "tags": fallback_tags,
             "tags_en": align_english_tags(fallback_tags),
         }
@@ -251,6 +266,8 @@ class AIEtlPipeline:
         summary_source = " ".join(part for part in (description, categories, title) if part)
         tags = self._extract_fallback_tags(summary_source, context, publication_context)
         audience = self._infer_faculty(summary_source)
+        if self._is_literature_context(publication_context):
+            audience = "TOAN_BO_SINH_VIEN_BKU"
 
         if description:
             summary = (
@@ -286,39 +303,149 @@ class AIEtlPipeline:
         faculty = self._infer_faculty(source)
         extractive_summary = self._extractive_content_summary(content_text)
 
+        if self._is_literature_context(" ".join(context.values()) + " " + content_text):
+            title = context.get("title", "").strip() or "Tác phẩm"
+            if extractive_summary:
+                return self._normalize_summary(
+                    f"{title} mở ra một văn bản văn học xoay quanh nhân vật, quan hệ xã hội và những xung đột "
+                    f"được thể hiện qua các đoạn tiêu biểu: {extractive_summary}"
+                )
+            return self._normalize_summary(
+                f"{title} là một văn bản văn học cần được đọc qua nhân vật, bối cảnh xã hội, giọng kể và các "
+                "xung đột cảm xúc được triển khai trong tác phẩm. Nội dung trích xuất hiện chưa đủ ổn định để "
+                "tạo bản tóm tắt sâu hơn mà không có nguy cơ suy diễn."
+            )
+
+        used_structured_fallback_summary = False
         if extractive_summary:
-            base = f"Tài liệu tập trung vào các nội dung chính sau: {extractive_summary}"
+            base = self._fallback_content_overview_vi(
+                fallback_tags=tags,
+                extractive_summary=extractive_summary,
+            )
+            if base:
+                used_structured_fallback_summary = True
+            else:
+                base = extractive_summary
         elif description:
             description = self._localize_known_description(description.rstrip("."))
             if self._normalize_text(description).startswith(("tai lieu", "khoa hoc", "giao trinh", "sach")):
                 base = f"{description}."
             else:
-                base = f"Tài liệu này giới thiệu {description}."
+                base = f"{description}."
         else:
             base = (
-                f"Nội dung tài liệu xoay quanh {tag_text}, với các phần giúp người đọc nhận diện "
-                "khái niệm chính, cách tiếp cận và phạm vi ứng dụng của chủ đề."
+                f"Nội dung trích xuất hiện chỉ cho thấy các chủ đề nổi bật như {tag_text}. Cần thêm văn bản "
+                "đại diện hơn để tạo bản tóm tắt chi tiết mà không suy diễn."
             )
 
-        if faculty == "KHOA_QUAN_LY_CONG_NGHIEP":
+        if used_structured_fallback_summary:
+            tail = ""
+        elif faculty == "KHOA_QUAN_LY_CONG_NGHIEP":
             tail = (
-                " Giá trị chính của tài liệu nằm ở việc hỗ trợ người đọc hiểu vấn đề quản lý, giao tiếp, "
-                "ra quyết định hoặc làm việc với con người trong bối cảnh thực tế. Người đọc có thể dùng "
-                "tài liệu như nguồn tham khảo định hướng trước khi đi sâu vào từng chương."
+                " Các đoạn hiện có gợi ý giá trị về quản lý, giao tiếp, ra quyết định hoặc làm việc với con "
+                "người trong bối cảnh thực tế."
             )
         elif faculty == "KHOA_DIEN_DIEN_TU":
             tail = (
-                " Tài liệu phù hợp để nắm các nguyên lý kỹ thuật, thành phần hệ thống và cách đo lường "
-                "hoặc thiết kế liên quan đến lĩnh vực điện, điện tử và cơ điện tử. Người đọc có thể dùng "
-                "nó để củng cố nền tảng trước khi áp dụng vào bài tập hoặc dự án."
+                " Các đoạn hiện có gợi ý nội dung liên quan đến nguyên lý kỹ thuật, thành phần hệ thống, đo "
+                "lường hoặc thiết kế trong lĩnh vực điện, điện tử và cơ điện tử."
             )
         else:
             tail = (
-                f" Nội dung có liên quan trực tiếp đến {tag_text}, giúp người đọc xây dựng nền tảng, "
-                "nắm phương pháp thực hành và định hướng ứng dụng kiến thức vào học tập hoặc dự án kỹ thuật."
+                f" Các đoạn hiện có gợi ý mối liên hệ với {tag_text}, nhưng bản tóm tắt này chỉ nên xem là "
+                "kết quả dự phòng khi mô hình ngôn ngữ không trả về metadata đạt chuẩn."
             )
 
         return self._normalize_summary(base + tail)
+
+    @classmethod
+    def _fallback_content_overview_vi(cls, fallback_tags: list[str], extractive_summary: str) -> str:
+        if cls._looks_vietnamese(extractive_summary):
+            return ""
+
+        normalized = cls._normalize_text(extractive_summary)
+        points: list[str] = []
+        if "supervised learning" in normalized or "regression" in normalized or "classification" in normalized:
+            points.append(
+                "học có giám sát, regression, classification và cách đánh giá khả năng khái quát hóa của mô hình"
+            )
+        if "feature engineering" in normalized or "model validation" in normalized or "overfitting" in normalized:
+            points.append(
+                "kỹ thuật đặc trưng, đánh giá mô hình, kiểm soát overfitting và phân tích lỗi trong quy trình dự đoán"
+            )
+        if "program" in normalized and "digital computer" in normalized:
+            points.append(
+                "quá trình chuẩn bị chương trình cho máy tính số, bao gồm cách diễn đạt lời giải đủ rõ để máy tính có thể thực thi"
+            )
+        if "stored program" in normalized or "instructions" in normalized:
+            points.append(
+                "mô hình máy tính lưu chương trình, nơi lệnh được giữ trong bộ nhớ và thực hiện tuần tự"
+            )
+        if "algorithm" in normalized:
+            points.append("thuật toán, phân tích thuật toán và các kỹ thuật lập trình nền tảng")
+        if "reference" in normalized or "self study" in normalized or "college course" in normalized:
+            points.append("vai trò của tài liệu như sách tham khảo, giáo trình tự học hoặc tài liệu cho học phần đại học")
+        if "exercise" in normalized:
+            points.append("hệ thống bài tập giúp người đọc luyện kỹ năng và kiểm tra mức độ hiểu nội dung")
+
+        if not points:
+            return ""
+
+        tag_text = ", ".join(fallback_tags[:4]) if fallback_tags else "các chủ đề lập trình và khoa học máy tính"
+        sentences = [f"Các đoạn OCR cho thấy tài liệu tập trung vào {points[0]}."]
+        if len(points) >= 3:
+            sentences.append(f"Nội dung cũng đề cập đến {points[1]} và {points[2]}.")
+            remaining = points[3:]
+        elif len(points) == 2:
+            sentences.append(f"Nội dung cũng đề cập đến {points[1]}.")
+            remaining = []
+        else:
+            sentences.append(f"Các chủ đề nổi bật có liên hệ với {tag_text}.")
+            remaining = []
+
+        if remaining:
+            sentences.append(f"Ngoài phần lý thuyết, tài liệu còn thể hiện {remaining[0]}.")
+        else:
+            sentences.append(f"Tài liệu phù hợp với người đọc đã có nền tảng nhất định và muốn học sâu hơn về {tag_text}.")
+        sentences.append(
+            "Do nguồn là OCR từ PDF dạng ảnh, bản tóm tắt này chỉ sử dụng những ý đọc được rõ ràng và tránh suy diễn ngoài văn bản."
+        )
+        return cls._normalize_summary(" ".join(sentences))
+
+    @classmethod
+    def _is_literature_context(cls, text: str) -> bool:
+        normalized = cls._normalize_text(text)
+        literature_terms = (
+            "courtship",
+            "english literature",
+            "fiction",
+            "novel",
+            "romance",
+            "van hoc",
+            "tieu thuyet",
+            "lang man",
+            "hon nhan",
+        )
+        return any(term in normalized for term in literature_terms)
+
+    @staticmethod
+    def _has_technical_generic_tags(tags: object) -> bool:
+        if not isinstance(tags, list):
+            return False
+        normalized_tags = {
+            AIEtlPipeline._normalize_text(str(tag))
+            for tag in tags
+        }
+        generic_technical = {
+            "noi dung chuyen nganh",
+            "kien thuc nen tang",
+            "phuong phap thuc hanh",
+            "ung dung thuc te",
+            "bai toan chuyen nganh",
+            "tu duy ky thuat",
+            "tu duy phan tich",
+        }
+        return len(normalized_tags.intersection(generic_technical)) >= 2
 
     @staticmethod
     def _localize_known_description(description: str) -> str:
@@ -331,6 +458,7 @@ class AIEtlPipeline:
 
     @staticmethod
     def _clean_summary_source(text: str) -> str:
+        text = strip_legal_and_publisher_boilerplate(strip_public_domain_boilerplate(text))
         text = re.sub(
             r"(?i)\b(publication id|title|subtitle|language|publication year|authors|categories|tags|ai summary)\s*:[^.!?\n]*(?:[.!?]\s*)?",
             " ",
@@ -344,23 +472,41 @@ class AIEtlPipeline:
         sentences = re.split(r"(?<=[.!?])\s+", text)
         useful = []
         noise_terms = (
+            "addison-wesley",
+            "cataloging-in-publication",
             "contents",
             "table of contents",
             "references",
             "bibliography",
             "copyright",
+            "project gutenberg",
+            "legal small print",
+            "donation",
+            "trademark",
+            "trade names",
+            "endorses this work",
+            "illustrative and educational purposes",
             "all rights reserved",
             "isbn",
             "preface",
             "acknowledg",
             "license",
+            "printed in",
+            "published simultaneously",
+            "isbn",
+            "cookbook",
+            "http://",
+            "https://",
         )
         for sentence in sentences:
             lowered = sentence.lower()
             symbol_ratio = sum(1 for ch in sentence if ch in "=∑∫√≤≥<>|{}[]") / max(len(sentence), 1)
+            digit_ratio = sum(ch.isdigit() for ch in sentence) / max(len(sentence), 1)
             if len(sentence) < 40 or any(term in lowered for term in noise_terms):
                 continue
             if symbol_ratio > 0.06:
+                continue
+            if digit_ratio > 0.18:
                 continue
             useful.append(sentence)
         return " ".join(useful[:10]) or text
@@ -375,10 +521,27 @@ class AIEtlPipeline:
             "authors:",
             "categories:",
             "copyright",
+            "project gutenberg",
+            "legal small print",
+            "donation",
+            "trademark",
+            "trade names",
+            "endorses this work",
+            "illustrative and educational purposes",
             "references",
             "bibliography",
             "table of contents",
             "contents",
+            "addison-wesley",
+            "cataloging-in-publication",
+            "cip",
+            "qa76",
+            "printed in",
+            "published simultaneously",
+            "mccall's cookbook",
+            "cookbook",
+            "http://",
+            "https://",
         )
         candidates: list[str] = []
         for sentence in sentences:
@@ -390,7 +553,8 @@ class AIEtlPipeline:
                 continue
             alpha_ratio = sum(ch.isalpha() for ch in clean) / max(len(clean), 1)
             symbol_ratio = sum(1 for ch in clean if ch in "=∑∫√≤≥<>|{}[]") / max(len(clean), 1)
-            if alpha_ratio < 0.55 or symbol_ratio > 0.04:
+            digit_ratio = sum(ch.isdigit() for ch in clean) / max(len(clean), 1)
+            if alpha_ratio < 0.55 or symbol_ratio > 0.04 or digit_ratio > 0.18:
                 continue
             candidates.append(clean)
             if len(candidates) >= 5:
@@ -407,6 +571,12 @@ class AIEtlPipeline:
     @staticmethod
     def _normalize_summary(text: str) -> str:
         return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def _looks_vietnamese(text: str) -> bool:
+        normalized = AIEtlPipeline._normalize_text(text)
+        vietnamese_terms = ("tai lieu", "noi dung", "nguoi doc", "chuong", "kien thuc", "phuong phap")
+        return sum(term in normalized for term in vietnamese_terms) >= 2
 
     @classmethod
     def _looks_like_catalog_or_low_value_summary(cls, summary: str) -> bool:
@@ -426,7 +596,22 @@ class AIEtlPipeline:
         )
         if any(term in lowered for term in blocked):
             return True
-        return False
+
+        normalized = cls._normalize_summary(summary)
+        sentences = [sentence for sentence in re.split(r"(?<=[.!?])\s+", normalized) if sentence.strip()]
+        if len(normalized) < 220 or len(sentences) < 3:
+            return True
+
+        generic_phrases = (
+            "cung cấp kiến thức tổng quan",
+            "giúp người đọc hiểu rõ hơn",
+            "nhiều khía cạnh khác nhau",
+            "các chủ đề liên quan",
+            "nội dung phong phú",
+            "kiến thức nền tảng",
+            "ứng dụng thực tế",
+        )
+        return sum(phrase in lowered for phrase in generic_phrases) >= 3
 
     @classmethod
     def _has_content_worth_summarizing(cls, texts: list[str]) -> bool:
@@ -456,6 +641,13 @@ class AIEtlPipeline:
             term in lowered
             for term in (
                 "copyright",
+                "project gutenberg",
+                "legal small print",
+                "donation",
+                "trademark",
+                "trade names",
+                "endorses this work",
+                "illustrative and educational purposes",
                 "all rights reserved",
                 "isbn",
                 "table of contents",
@@ -492,8 +684,10 @@ class AIEtlPipeline:
 
     def _infer_faculty(self, text: str) -> str:
         normalized = self._normalize_text(text)
+        if self._is_literature_context(text):
+            return "TOAN_BO_SINH_VIEN_BKU"
         keyword_map = [
-            ("KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH", ("computer", "software", "algorithm", "data", "program", "code", "lap trinh", "thuat toan", "co so du lieu")),
+            ("KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH", ("computer", "software", "algorithm", "data", "program", "code", "lap trinh", "thuat toan", "co so du lieu", "cong nghe thong tin", "machine learning", "hoc may", "supervised", "regression", "classification")),
             ("KHOA_DIEN_DIEN_TU", ("dien", "dien tu", "circuit", "electronics", "signal")),
             ("KHOA_CO_KHI", ("co khi", "mechanical", "manufacturing")),
             ("KHOA_KY_THUAT_HOA_HOC", ("hoa hoc", "chemical", "chemistry")),
@@ -508,7 +702,7 @@ class AIEtlPipeline:
         for faculty, keywords in keyword_map:
             if any(keyword in normalized for keyword in keywords):
                 return faculty
-        return "KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH"
+        return "TOAN_BO_SINH_VIEN_BKU"
 
     def _extract_fallback_tags(
         self,
@@ -528,22 +722,28 @@ class AIEtlPipeline:
         if len(tags) >= 5:
             return tags[:5]
 
-        backfill = dedupe_quality_tags(
-            [
-                "Nội Dung Chuyên Ngành",
-                "Kiến Thức Nền Tảng",
-                "Phương Pháp Thực Hành",
-                "Ứng Dụng Thực Tế",
-                "Tư Duy Kỹ Thuật",
-            ],
-            publication_context,
-            limit=5,
-        )
-        for tag in backfill:
-            if len(tags) >= 5:
-                break
-            if tag.lower() not in {existing.lower() for existing in tags}:
-                tags.append(tag)
+        if self._is_literature_context(source):
+            backfill = dedupe_quality_tags(
+                [
+                    "Văn Học Anh",
+                    "Tiểu Thuyết",
+                    "Sách Khai Phóng",
+                    "Lãng Mạn",
+                    "Kinh Dị Gothic",
+                    "Khoa Học Viễn Tưởng",
+                    "Châm Biếm Xã Hội",
+                    "Quan Hệ Gia Đình",
+                ],
+                publication_context,
+                limit=5,
+            )
+            for tag in backfill:
+                if len(tags) >= 5:
+                    break
+                if tag.lower() not in {existing.lower() for existing in tags}:
+                    tags.append(tag)
+            return tags[:5]
+
         return tags[:5]
 
     @staticmethod
@@ -585,6 +785,16 @@ class AIEtlPipeline:
             vectors = [vectors[index] for index in eligible_indices]
 
         embeddings = np.array(vectors, dtype=np.float32)
+        if embeddings.ndim != 2 or embeddings.shape[0] != len(chunks):
+            return [chunk.text for chunk in chunks[: min(max_chunks, len(chunks))]]
+
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        embeddings = np.divide(
+            embeddings,
+            np.maximum(norms, 1e-12),
+            out=np.zeros_like(embeddings),
+            where=norms > 0,
+        )
         total_chunks = len(chunks)
         target = min(max_chunks, max(8, int(math.sqrt(total_chunks) * 2)), total_chunks)
 
@@ -598,6 +808,8 @@ class AIEtlPipeline:
         selected: list[int] = []
         if total_chunks > 0:
             selected.append(0)
+        if total_chunks > 1 and len(selected) < target:
+            selected.append(1)
 
         centroid_idx = int(np.argmax(similarities))
         if centroid_idx not in selected:

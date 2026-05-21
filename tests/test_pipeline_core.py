@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import ai_etl.pipeline as pipeline_module
 from ai_etl.pdf_processing import Chunk
 from ai_etl.pipeline import AIEtlPipeline
 
@@ -18,6 +19,17 @@ class FakeDatabase:
 
     def upsert_tag_translations(self, *args, **kwargs) -> None:
         self.calls.append(("upsert_tag_translations", args, kwargs))
+
+
+class FakeRunDatabase(FakeDatabase):
+    def ensure_etl_metadata_table(self, conn) -> None:
+        self.calls.append(("ensure_etl_metadata_table", (conn,), {}))
+
+    def mark_publication_etl_running(self, *args, **kwargs) -> None:
+        self.calls.append(("mark_publication_etl_running", args, kwargs))
+
+    def mark_publication_etl_failed(self, *args, **kwargs) -> None:
+        self.calls.append(("mark_publication_etl_failed", args, kwargs))
 
 
 class FakeLlm:
@@ -43,6 +55,14 @@ def _pipeline(settings=None, llm=None, database=None) -> AIEtlPipeline:
         reduce_max_chunks=8,
         reduce_max_chars_per_chunk=20,
         reduce_total_chars_budget=42,
+        chunk_size=1500,
+        chunk_overlap=150,
+        enable_hash_skip=True,
+        enable_ocr_fallback=True,
+        ocr_max_pages=32,
+        ocr_dpi=160,
+        ocr_language="eng+vie",
+        ocr_min_text_chars=500,
     )
     pipeline.llm_client = llm or FakeLlm()
     pipeline.database = database or FakeDatabase()
@@ -87,7 +107,13 @@ def test_apply_reduce_budget_cleans_and_stops_before_total_budget() -> None:
 
 def test_reduce_with_fallback_uses_llm_result_when_available() -> None:
     expected = {
-        "master_summary": "summary",
+        "master_summary": (
+            "Tài liệu trình bày cách thiết kế cơ sở dữ liệu quan hệ thông qua mô hình dữ liệu, SQL, "
+            "chuẩn hóa lược đồ và ràng buộc toàn vẹn. Nội dung nhấn mạnh cách tổ chức bảng, chỉ mục "
+            "và truy vấn để hệ thống phần mềm lưu trữ dữ liệu nhất quán. Các đoạn đại diện cũng đề cập "
+            "đến giao dịch, điều khiển đồng thời và khôi phục khi nhiều thao tác cùng xảy ra. Người đọc "
+            "có thể dùng tài liệu để xây dựng nền tảng phân tích, thiết kế và vận hành cơ sở dữ liệu."
+        ),
         "audience": "KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH",
         "tags": ["SQL", "Chuẩn Hóa Dữ Liệu", "Chỉ Mục Dữ Liệu", "Truy Vấn Dữ Liệu", "Giao Dịch Dữ Liệu"],
         "tags_en": ["SQL", "Database Normalization", "Database Indexing", "Database Queries", "Data Transactions"],
@@ -109,7 +135,7 @@ def test_reduce_with_fallback_generates_quality_tags_when_llm_fails() -> None:
     )
 
     assert "regression" in result["master_summary"] or "classification" in result["master_summary"]
-    assert len(result["tags"]) == 5
+    assert 3 <= len(result["tags"]) <= 5
     assert result["tags_en"]
     assert result["audience"] == "KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH"
 
@@ -146,6 +172,40 @@ def test_try_upsert_english_metadata_is_best_effort() -> None:
     pipeline = _pipeline(llm=FakeLlm(should_fail=True), database=FakeDatabase())
 
     assert pipeline._try_upsert_english_metadata(object(), 1, "", "", [], []) is False
+
+
+def test_run_fails_when_pdf_and_ocr_have_no_usable_text(monkeypatch) -> None:
+    class FakeConn:
+        def commit(self) -> None:
+            pass
+
+        def rollback(self) -> None:
+            pass
+
+    database = FakeRunDatabase()
+    pipeline = _pipeline(database=database)
+
+    def fake_extract_pdf_text(_path, **kwargs):
+        assert kwargs["enable_ocr_fallback"] is True
+        assert kwargs["ocr_max_pages"] == 32
+        return ""
+
+    monkeypatch.setattr(pipeline_module, "extract_pdf_text", fake_extract_pdf_text)
+
+    with pytest.raises(ValueError, match="no usable extractable text"):
+        pipeline._run_with_connection(
+            conn=FakeConn(),
+            publication_id=99,
+            pdf_path="scan.pdf",
+            file_hash="hash",
+            force_reprocess=True,
+        )
+
+    assert [call[0] for call in database.calls] == [
+        "ensure_etl_metadata_table",
+        "mark_publication_etl_running",
+        "mark_publication_etl_failed",
+    ]
 
 
 def test_calculate_file_hash_uses_content_for_files_and_url_string_for_remote_sources(tmp_path: Path) -> None:

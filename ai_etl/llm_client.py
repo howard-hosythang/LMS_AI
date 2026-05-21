@@ -24,6 +24,7 @@ class LLMResponseError(RuntimeError):
 
 
 FACULTY_TARGETS = {
+    "TOAN_BO_SINH_VIEN_BKU",
     "KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH",
     "KHOA_DIEN_DIEN_TU",
     "KHOA_CO_KHI",
@@ -294,45 +295,49 @@ class GeminiClient:
         representative_chunks: list[str],
         publication_context: str = "",
     ) -> dict[str, Any]:
+
         faculty_values = ", ".join(sorted(FACULTY_TARGETS))
-        prompt = (
-            "Bạn là thủ thư đại học và chuyên viên biên mục học thuật. Nhiệm vụ là đọc các "
-            "đoạn nội dung trích từ PDF và tạo metadata có thể dùng thật trong thư viện.\n"
-            "QUY TẮC BẮT BUỘC:\n"
-            "1. master_summary chỉ được dựa trên CONTENT_EXCERPTS. Không được ghép Title, Authors, "
-            "Categories hoặc Description thành summary. CATALOG_CONTEXT chỉ dùng để khử nhập nhằng "
-            "và chọn audience/tag khi nội dung PDF đã hỗ trợ nhận định đó.\n"
-            "2. Summary phải nói về nội dung học thuật bên trong tài liệu: khái niệm, phương pháp, "
-            "phạm vi kiến thức, kỹ năng người đọc học được. Không mô tả hệ thống AI, lập chỉ mục, "
-            "metadata, thư viện, file PDF hoặc quy trình xử lý dữ liệu.\n"
-            "3. Nếu excerpt không đủ bằng chứng cho một ý, không đưa ý đó vào summary.\n"
-            "4. Category là nhóm bao phủ rộng; tag là nhãn chủ đề/kỹ năng/công nghệ cụ thể hơn category. "
-            "Không dùng tên khoa, tên category rộng, tên sách, tên tác giả hoặc publisher làm tag.\n"
-            "5. Bỏ qua nhiễu OCR/PDF như số trang, header/footer, mục lục, tài liệu tham khảo, "
-            "copyright, công thức/code rời rạc không đủ ngữ cảnh.\n"
-            "6. Tag bắt buộc viết bằng tiếng Việt, là cụm danh từ tìm kiếm thực tế, 2-4 từ nếu có thể, "
-            "tối đa 50 ký tự, không quá chung như Sách, Giáo Trình, Công Nghệ, Kỹ Thuật, "
-            "Science, Result, Numbers.\n"
-            "7. tags_en là bản tiếng Anh tương ứng từng tag tiếng Việt, cùng thứ tự, dùng thuật ngữ "
-            "người học hay tìm kiếm như Web Development, Machine Learning, Database Normalization. "
-            "Không dịch máy từng chữ nếu thuật ngữ chuyên ngành tiếng Anh đã có cách gọi chuẩn.\n"
-            "Hãy tổng hợp thành metadata toàn cục và xuất đúng 1 JSON object duy nhất.\n"
-            "JSON bắt buộc có đúng các trường:\n"
-            "- master_summary: tiếng Việt tự nhiên, 120-180 từ, 4-6 câu, nêu đúng nội dung chính, "
-            "phạm vi kiến thức, cách tiếp cận và giá trị học tập; không mở đầu bằng tên sách/tác giả, "
-            "không chép nguyên văn excerpt dài.\n"
-            "- audience: đúng 1 mã khoa phù hợp nhất trong danh sách sau, không được mô tả tự do: "
-            f"{faculty_values}\n"
-            "- tags: mảng chính xác 5 tag tiếng Việt tốt nhất, không trùng nhau; ưu tiên thuật ngữ "
-            "chuyên môn người dùng có khả năng bấm/tìm kiếm, ví dụ Học Máy, Chuẩn Hóa Dữ Liệu, "
-            "Lập Trình Python, Mạch Điện Tử, Quản Lý Dự Án.\n"
-            "- tags_en: mảng chính xác 5 tag tiếng Anh tương ứng 1-1 với tags, không trùng nhau.\n"
-            "Không thêm trường khác, không markdown, không giải thích.\n\n"
-            "CATALOG_CONTEXT:\n"
-            f"{publication_context or '(không có)'}\n\n"
-            "CONTENT_EXCERPTS:\n"
-            f"{json.dumps(representative_chunks, ensure_ascii=False)}"
-        )
+
+        prompt = f"""Bạn là một chuyên viên biên mục học thuật và thủ thư đại học.
+Nhiệm vụ: Trích xuất metadata chuẩn xác từ CONTENT_EXCERPTS để phục vụ hệ thống quản lý thư viện thật.
+CATALOG_CONTEXT chỉ dùng để nhận diện nhan đề/tác giả/chủ đề sơ bộ; không được biến CATALOG_CONTEXT thành nội dung tóm tắt nếu CONTENT_EXCERPTS không chứng minh.
+
+### QUY TẮC CỐT LÕI
+1. TÓM TẮT (master_summary):
+- Chiều dài: 120-180 từ (4-6 câu).
+- Trọng tâm: Nêu rõ tài liệu đang dạy/kể/nghiên cứu vấn đề gì, phạm vi chương mục chính, khái niệm/phương pháp trung tâm, kỹ năng hoặc giá trị đọc thực tế.
+- Văn phong: Tiếng Việt tự nhiên, chuyên nghiệp, hữu ích cho sinh viên khi quyết định mượn/đọc. Không mở đầu bằng "Tài liệu này thuộc...", "Hệ thống AI...", "File PDF...".
+- Bám bằng chứng: Mỗi ý chính phải được CONTENT_EXCERPTS hỗ trợ. Không thêm tác giả, năm, chương, công nghệ, kết luận hoặc mục tiêu học tập nếu không thấy trong excerpts.
+- Nếu excerpts chủ yếu là mục lục, copyright, reference, OCR rời rạc hoặc quá ít nội dung: viết tóm tắt thận trọng, nói rõ chỉ có thể xác định phạm vi sơ bộ, không bịa chi tiết.
+- Chủ động lọc nhiễu OCR: số trang, header/footer, legal print, copyright, ISBN, mục lục, reference, code rời rạc, bảng công thức không có ngữ cảnh.
+
+2. ĐỐI TƯỢNG (audience):
+- Trích xuất đúng 1 mã khoa phù hợp nhất từ danh sách sau: {faculty_values}.
+- Nếu CATALOG_CONTEXT thể hiện đây là tiểu thuyết/sách giải trí chung, bắt buộc dùng mã: TOAN_BO_SINH_VIEN_BKU.
+
+3. TỪ KHÓA (tags & tags_en):
+- Số lượng: 3-5 tags, cấu trúc là các cụm danh từ ngắn (tối đa 50 ký tự) có giá trị tìm kiếm cao.
+- Phân loại: Dùng thuật ngữ chuyên ngành cụ thể (Ví dụ: Học Máy, Chuẩn Hóa Dữ Liệu, Kinh Dị Gothic). Tuyệt đối tránh các từ khóa quá rộng (như Sách, Kỹ Thuật, Ứng Dụng).
+- Không dùng nhan đề sách, tên tác giả, tên khoa, tên category quá rộng, hoặc cụm mô tả chung như "Kiến Thức Nền Tảng", "Ứng Dụng Thực Tế", "Nội Dung Chuyên Ngành".
+- Tiếng Anh: Dịch chuẩn xác theo thuật ngữ chuyên ngành thực tế, ưu tiên cụm từ người học hay tìm kiếm.
+
+### ĐỊNH DẠNG ĐẦU RA (Strict JSON)
+Bạn phải trả về DUY NHẤT 1 object JSON hợp lệ. Bắt buộc bỏ qua các block bọc markdown (như ```json) và không kèm bất kỳ giải thích nào để hệ thống parse trực tiếp.
+Cấu trúc bắt buộc:
+{{
+    "master_summary": "Nội dung tóm tắt tiếng Việt...",
+    "audience": "MÃ_KHOA_DUY_NHAT",
+    "tags": ["Tag 1", "Tag 2", "Tag 3"],
+    "tags_en": ["Tag 1 EN", "Tag 2 EN", "Tag 3 EN"]
+}}
+
+        ### DỮ LIỆU ĐẦU VÀO
+        CATALOG_CONTEXT:
+        {publication_context or '(không có)'}
+
+        CONTENT_EXCERPTS:
+        {json.dumps(representative_chunks, ensure_ascii=False)}
+        """
 
         raw = self._call(prompt, model=model)
         payload = self.extract_json_payload(raw)
@@ -377,28 +382,13 @@ class GeminiClient:
                 clean_tags.append(fallback_tag)
                 clean_tags_en_candidates.append("")
 
-        for fallback_tag in dedupe_quality_tags(
-            [
-                "Kiến Thức Nền Tảng",
-                "Phương Pháp Thực Hành",
-                "Ứng Dụng Thực Tế",
-                "Bài Toán Chuyên Ngành",
-                "Tư Duy Phân Tích",
-            ],
-            publication_context,
-            limit=5,
-        ):
-            if len(clean_tags) >= 5:
-                break
-            if fallback_tag.lower() not in {tag.lower() for tag in clean_tags}:
-                clean_tags.append(fallback_tag)
-                clean_tags_en_candidates.append("")
-
-        if len(clean_tags) != 5:
-            raise LLMResponseError("Reduce response must contain exactly 5 useful unique tags")
+        if len(clean_tags) < 3:
+            raise LLMResponseError("Reduce response must contain at least 3 useful unique tags")
 
         if self._looks_like_catalog_summary(master_summary):
             raise LLMResponseError("Reduce summary appears to be catalog metadata, not content")
+        if self._looks_low_value_summary(master_summary):
+            raise LLMResponseError("Reduce summary is too generic or low value")
 
         clean_tags_en = align_english_tags(
             clean_tags,
@@ -434,8 +424,44 @@ class GeminiClient:
             "các chủ đề nổi bật gồm",
             "file pdf",
             "thư viện",
+            "project gutenberg",
+            "legal small print",
+            "donation",
+            "license",
+            "trademark",
+            "trade names",
+            "endorses this work",
+            "illustrative and educational purposes",
         )
         return any(phrase in lowered for phrase in blocked_phrases)
+
+    @staticmethod
+    def _looks_low_value_summary(summary: str) -> bool:
+        clean = re.sub(r"\s+", " ", summary).strip()
+        if len(clean) < 220:
+            return True
+
+        sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", clean) if sentence.strip()]
+        if len(sentences) < 3:
+            return True
+
+        lowered = clean.lower()
+        generic_phrases = (
+            "cung cấp kiến thức tổng quan",
+            "giúp người đọc hiểu rõ hơn",
+            "phù hợp với sinh viên",
+            "nhiều khía cạnh khác nhau",
+            "các chủ đề liên quan",
+            "nội dung phong phú",
+            "kiến thức nền tảng",
+            "ứng dụng thực tế",
+        )
+        if sum(phrase in lowered for phrase in generic_phrases) >= 3:
+            return True
+
+        unique_words = set(re.findall(r"[\wÀ-ỹ]+", lowered, flags=re.UNICODE))
+        total_words = re.findall(r"[\wÀ-ỹ]+", lowered, flags=re.UNICODE)
+        return bool(total_words) and len(unique_words) / len(total_words) < 0.38
 
     @staticmethod
     def _coerce_audience(raw_audience: str, summary: str) -> str:
@@ -443,6 +469,8 @@ class GeminiClient:
             return raw_audience
 
         text = f"{raw_audience} {summary}".lower()
+        if any(keyword in text for keyword in ("văn học", "tiểu thuyết", "fiction", "novel", "literature", "khai phóng", "giải trí")):
+            return "TOAN_BO_SINH_VIEN_BKU"
         keyword_map = [
             ("KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH", ("computer", "software", "algorithm", "data", "ai", "machine learning", "lập trình", "thuật toán", "cơ sở dữ liệu", "máy tính")),
             ("KHOA_DIEN_DIEN_TU", ("điện", "điện tử", "mạch", "signal", "circuit", "electronics")),
@@ -459,4 +487,4 @@ class GeminiClient:
         for faculty, keywords in keyword_map:
             if any(keyword in text for keyword in keywords):
                 return faculty
-        return "KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH"
+        return "TOAN_BO_SINH_VIEN_BKU"
