@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -61,11 +62,55 @@ _STRUCTURAL_NOISE_LINE_PATTERN = re.compile(
 )
 _SENTENCE_BOUNDARY_PATTERN = re.compile(r"(?<=[.!?。！？])\s+")
 _MIN_OCR_ALPHA_RATIO = 0.45
+_BROKEN_OCR_TOKEN_PATTERN = re.compile(
+    r"\b(?=[A-Za-z0-9_~.-]{6,}\b)(?=\S*[A-Za-z])(?=\S*(?:\d|_|~))[A-Za-z0-9_~.-]+\b"
+)
+_BROKEN_SHORT_OCR_TOKEN_PATTERN = re.compile(r"(?<!\w)[a-zA-Z]{1,4}\._+")
+
+
+def _looks_like_broken_ocr_line(line: str) -> bool:
+    if len(line) < 24:
+        return False
+
+    tokens = re.findall(r"[A-Za-zÀ-ỹ0-9_~.-]+", line)
+    if not tokens:
+        return True
+
+    broken_tokens = [
+        token for token in tokens
+        if _BROKEN_OCR_TOKEN_PATTERN.fullmatch(token)
+        or _BROKEN_SHORT_OCR_TOKEN_PATTERN.fullmatch(token)
+    ]
+    symbol_ratio = sum(1 for ch in line if ch in "_~^`|{}[]<>\\") / max(len(line), 1)
+    digit_ratio = sum(ch.isdigit() for ch in line) / max(len(line), 1)
+
+    return len(broken_tokens) / max(len(tokens), 1) > 0.22 or symbol_ratio > 0.08 or digit_ratio > 0.28
+
+
+def clean_ocr_artifacts(text: str) -> str:
+    """Drop OCR garbage tokens/lines while preserving readable prose."""
+    if not text:
+        return ""
+
+    text = unicodedata.normalize("NFKC", text)
+    kept_lines: list[str] = []
+    for raw_line in text.splitlines() or [text]:
+        line = _NULL_CHAR_PATTERN.sub("", raw_line)
+        line = _BROKEN_SHORT_OCR_TOKEN_PATTERN.sub(" ", line)
+        line = _BROKEN_OCR_TOKEN_PATTERN.sub(" ", line)
+        line = re.sub(r"([A-Za-zÀ-ỹ])~+\b", r"\1", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line or _looks_like_broken_ocr_line(line):
+            continue
+        kept_lines.append(line)
+
+    return _WHITESPACE_PATTERN.sub(" ", " ".join(kept_lines)).strip()
 
 
 def sanitize_text(text: str) -> str:
     """Remove PostgreSQL-breaking null chars and normalize noisy spacing."""
     text = _NULL_CHAR_PATTERN.sub("", text)
+    text = clean_ocr_artifacts(text)
     text = _WHITESPACE_PATTERN.sub(" ", text)
     return text.strip()
 

@@ -104,6 +104,63 @@ def test_reduce_once_rejects_catalog_like_summary() -> None:
         client._reduce_once("cheap", ["Nội dung về machine learning."], "")
 
 
+def test_reduce_once_rejects_english_dominant_summary() -> None:
+    client = StubGeminiClient([
+        json.dumps({
+            "master_summary": (
+                "When Breath Becomes Air is a memoir about patients, physicians, diagnosis and treatment. "
+                "The book describes medical cases, family relationships and questions about life and death. "
+                "It presents the author through hospital work, illness and personal reflection. "
+                "Readers can understand the emotional pressure of medicine and the human side of clinical care."
+            ),
+            "audience": "TOAN_BO_SINH_VIEN_BKU",
+            "tags": ["Hồi Ký", "Y Học", "Tự Truyện"],
+            "tags_en": ["Memoir", "Medicine", "Autobiography"],
+        }, ensure_ascii=False)
+    ])
+
+    with pytest.raises(LLMResponseError, match="Vietnamese"):
+        client._reduce_once(
+            "cheap",
+            ["When Breath Becomes Air describes medical cases, patients, physicians and family relationships."],
+            "Title: When Breath Becomes Air\nCategories: Biography & Autobiography",
+        )
+
+
+def test_reduce_once_removes_ocr_hedging_from_summary() -> None:
+    client = StubGeminiClient([
+        json.dumps({
+            "master_summary": (
+                "Các đoạn OCR cho thấy tài liệu tập trung vào thuật toán, phân tích thuật toán "
+                "và các kỹ thuật lập trình nền tảng. Nội dung trình bày cấu trúc dữ liệu, "
+                "độ phức tạp tính toán và cách thiết kế lời giải cho nhiều lớp bài toán. "
+                "Hệ thống bài tập giúp người đọc rèn luyện tư duy phân tích, kiểm chứng độ đúng "
+                "và lựa chọn chiến lược cài đặt phù hợp. Tác phẩm là nền tảng quan trọng cho "
+                "sinh viên khoa học máy tính khi học sâu về thuật toán và cấu trúc dữ liệu. "
+                "Do nguồn là OCR từ PDF dạng ảnh, bản tóm tắt này chỉ sử dụng những ý đọc được rõ ràng "
+                "và tránh suy diễn ngoài văn bản."
+            ),
+            "audience": "KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH",
+            "tags": ["Thuật Toán", "Cấu Trúc Dữ Liệu", "Phân Tích Độ Phức Tạp"],
+            "tags_en": ["Algorithms", "Data Structures", "Complexity Analysis"],
+        }, ensure_ascii=False)
+    ])
+
+    result = client._reduce_once(
+        "cheap",
+        [
+            "Algorithms, data structures, complexity analysis, correctness proofs and exercises "
+            "for computer science students."
+        ],
+        "Title: Introduction to Algorithms",
+    )
+
+    assert result["master_summary"].startswith("Tài liệu tập trung vào thuật toán")
+    assert "OCR" not in result["master_summary"]
+    assert "PDF dạng ảnh" not in result["master_summary"]
+    assert "tránh suy diễn" not in result["master_summary"]
+
+
 def test_translate_terms_requires_same_length_response() -> None:
     client = StubGeminiClient(['["Web Development"]'])
 

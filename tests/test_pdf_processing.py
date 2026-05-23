@@ -6,6 +6,7 @@ from ai_etl.pdf_processing import (
     _clean_pdf_pages,
     _has_usable_ocr_text,
     _select_ocr_page_indices,
+    clean_ocr_artifacts,
     sanitize_text,
     sliding_window_chunk,
 )
@@ -29,6 +30,19 @@ def test_clean_pdf_pages_removes_repeated_page_furniture_and_noise() -> None:
 
 def test_sanitize_text_removes_nulls_and_collapses_whitespace() -> None:
     assert sanitize_text("  A\x00I\n\n  service\tmetadata  ") == "AI service metadata"
+
+
+def test_clean_ocr_artifacts_removes_broken_tokens_without_dropping_prose() -> None:
+    raw = (
+        "ws._ the execution of aprocessthat isnot completely inl1e1YI_cID~~ (Chapter 9). "
+        "The virtual-memory scheme enables users to run programs that are larger than actual memory."
+    )
+
+    cleaned = clean_ocr_artifacts(raw)
+
+    assert "inl1e1YI_cID" not in cleaned
+    assert "ws._" not in cleaned
+    assert "virtual-memory scheme" in cleaned
 
 
 def test_sliding_window_chunk_creates_stable_ids_and_overlap() -> None:

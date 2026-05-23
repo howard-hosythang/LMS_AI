@@ -23,6 +23,7 @@ class Settings:
     reduce_total_chars_budget: int
     enable_hash_skip: bool
     enable_english_translation: bool
+    allow_metadata_fallback: bool
     enable_ocr_fallback: bool
     ocr_max_pages: int
     ocr_dpi: int
@@ -89,6 +90,10 @@ def load_settings() -> Settings:
         enable_hash_skip=_parse_bool(os.getenv("AI_ETL_ENABLE_HASH_SKIP", "true"), True),
         enable_english_translation=_parse_bool(
             os.getenv("AI_ETL_ENABLE_ENGLISH_TRANSLATION", "false"),
+            False,
+        ),
+        allow_metadata_fallback=_parse_bool(
+            os.getenv("AI_ETL_ALLOW_METADATA_FALLBACK", "false"),
             False,
         ),
         enable_ocr_fallback=_parse_bool(os.getenv("AI_ETL_ENABLE_OCR_FALLBACK", "true"), True),

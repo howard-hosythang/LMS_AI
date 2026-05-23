@@ -306,9 +306,12 @@ CATALOG_CONTEXT chỉ dùng để nhận diện nhan đề/tác giả/chủ đ�
 1. TÓM TẮT (master_summary):
 - Chiều dài: 120-180 từ (4-6 câu).
 - Trọng tâm: Nêu rõ tài liệu đang dạy/kể/nghiên cứu vấn đề gì, phạm vi chương mục chính, khái niệm/phương pháp trung tâm, kỹ năng hoặc giá trị đọc thực tế.
-- Văn phong: Tiếng Việt tự nhiên, chuyên nghiệp, hữu ích cho sinh viên khi quyết định mượn/đọc. Không mở đầu bằng "Tài liệu này thuộc...", "Hệ thống AI...", "File PDF...".
+- Văn phong: Tiếng Việt tự nhiên, chuyên nghiệp, tự tin như một chuyên gia đã đọc và hiểu cuốn sách, hữu ích cho sinh viên khi quyết định mượn/đọc. Không mở đầu bằng "Tài liệu này thuộc...", "Hệ thống AI...", "File PDF...".
+- Không nhắc đến quy trình xử lý dữ liệu hoặc mức độ chắc chắn của nguồn. Tuyệt đối không dùng các cụm như "Các đoạn OCR cho thấy", "dựa trên OCR", "nguồn là OCR", "PDF dạng ảnh", "chỉ sử dụng những ý đọc được", "tránh suy diễn", "có thể xác định", "phạm vi sơ bộ".
+- Ngôn ngữ: master_summary bắt buộc viết bằng tiếng Việt. Không sao chép nguyên câu tiếng Anh từ CONTENT_EXCERPTS; hãy chuyển ý sang tiếng Việt. Chỉ giữ tiếng Anh cho tên riêng, nhan đề tác phẩm, thuật ngữ chuyên môn quen thuộc hoặc từ khóa thật sự cần thiết.
 - Bám bằng chứng: Mỗi ý chính phải được CONTENT_EXCERPTS hỗ trợ. Không thêm tác giả, năm, chương, công nghệ, kết luận hoặc mục tiêu học tập nếu không thấy trong excerpts.
-- Nếu excerpts chủ yếu là mục lục, copyright, reference, OCR rời rạc hoặc quá ít nội dung: viết tóm tắt thận trọng, nói rõ chỉ có thể xác định phạm vi sơ bộ, không bịa chi tiết.
+- Chỉ nhắc số chương/tên chương khi excerpts có mục lục hoặc tiêu đề chương rõ ràng. Nếu excerpts là các đoạn rời, hãy tóm tắt theo chủ đề/khái niệm thay vì liệt kê chương.
+- Nếu excerpts chủ yếu là mục lục, copyright, reference, OCR rời rạc hoặc quá ít nội dung: vẫn viết bằng giọng biên mục chắc chắn, khái quát theo chủ đề học thuật quan sát được, không bịa chi tiết và không xin lỗi/không giải thích hạn chế nguồn.
 - Chủ động lọc nhiễu OCR: số trang, header/footer, legal print, copyright, ISBN, mục lục, reference, code rời rạc, bảng công thức không có ngữ cảnh.
 
 2. ĐỐI TƯỢNG (audience):
@@ -316,7 +319,7 @@ CATALOG_CONTEXT chỉ dùng để nhận diện nhan đề/tác giả/chủ đ�
 - Nếu CATALOG_CONTEXT thể hiện đây là tiểu thuyết/sách giải trí chung, bắt buộc dùng mã: TOAN_BO_SINH_VIEN_BKU.
 
 3. TỪ KHÓA (tags & tags_en):
-- Số lượng: 3-5 tags, cấu trúc là các cụm danh từ ngắn (tối đa 50 ký tự) có giá trị tìm kiếm cao.
+- Số lượng: 3-5 tags, chỉ thêm tag khi có tín hiệu rõ trong CONTENT_EXCERPTS hoặc CATALOG_CONTEXT. Ưu tiên đúng và chuyên biệt hơn là đủ số lượng.
 - Phân loại: Dùng thuật ngữ chuyên ngành cụ thể (Ví dụ: Học Máy, Chuẩn Hóa Dữ Liệu, Kinh Dị Gothic). Tuyệt đối tránh các từ khóa quá rộng (như Sách, Kỹ Thuật, Ứng Dụng).
 - Không dùng nhan đề sách, tên tác giả, tên khoa, tên category quá rộng, hoặc cụm mô tả chung như "Kiến Thức Nền Tảng", "Ứng Dụng Thực Tế", "Nội Dung Chuyên Ngành".
 - Tiếng Anh: Dịch chuẩn xác theo thuật ngữ chuyên ngành thực tế, ưu tiên cụm từ người học hay tìm kiếm.
@@ -344,7 +347,7 @@ Cấu trúc bắt buộc:
         if not isinstance(payload, dict):
             raise LLMResponseError("Reduce response is not a JSON object")
 
-        master_summary = str(payload.get("master_summary", "")).strip()
+        master_summary = self._clean_assertive_summary(str(payload.get("master_summary", "")).strip())
         audience = self._coerce_audience(str(payload.get("audience", "")).strip(), master_summary)
         tags = payload.get("tags", [])
         tags_en = payload.get("tags_en", [])
@@ -389,6 +392,8 @@ Cấu trúc bắt buộc:
             raise LLMResponseError("Reduce summary appears to be catalog metadata, not content")
         if self._looks_low_value_summary(master_summary):
             raise LLMResponseError("Reduce summary is too generic or low value")
+        if self._looks_english_dominant_summary(master_summary):
+            raise LLMResponseError("Reduce summary must be written primarily in Vietnamese")
 
         clean_tags_en = align_english_tags(
             clean_tags,
@@ -398,13 +403,48 @@ Cấu trúc bắt buộc:
         return {
             "master_summary": master_summary,
             "audience": audience,
-            "tags": clean_tags[:5],
+            "tags": clean_tags,
             "tags_en": clean_tags_en,
         }
 
     @staticmethod
     def _fallback_tags_from_text(text: str, publication_context: str = "") -> list[str]:
         return suggest_tags_from_text(text, publication_context, limit=5)
+
+    @staticmethod
+    def _clean_assertive_summary(summary: str) -> str:
+        clean = re.sub(r"\s+", " ", summary).strip()
+        if not clean:
+            return ""
+
+        blocked_patterns = (
+            r"(?i)\b(các\s+)?đoạn\s+ocr\s+cho\s+thấy\b",
+            r"(?i)\b(dựa\s+trên|theo|từ)\s+(các\s+)?(đoạn\s+)?ocr\b",
+            r"(?i)\bnguồn\s+là\s+ocr\b",
+            r"(?i)\bpdf\s+dạng\s+ảnh\b",
+            r"(?i)\bbản\s+tóm\s+tắt\s+này\s+chỉ\s+sử\s+dụng\b",
+            r"(?i)\bchỉ\s+sử\s+dụng\s+những\s+ý\s+đọc\s+được\b",
+            r"(?i)\btránh\s+suy\s+diễn\s+ngoài\s+văn\s+bản\b",
+            r"(?i)\bchỉ\s+có\s+thể\s+xác\s+định\s+phạm\s+vi\s+sơ\s+bộ\b",
+        )
+        sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", clean) if sentence.strip()]
+        kept: list[str] = []
+        for sentence in sentences:
+            rewritten = re.sub(
+                r"(?i)^(các\s+)?đoạn\s+ocr\s+cho\s+thấy\s+",
+                "",
+                sentence,
+            ).strip()
+            if any(re.search(pattern, rewritten) for pattern in blocked_patterns):
+                continue
+            if rewritten:
+                kept.append(rewritten)
+
+        cleaned = " ".join(kept).strip() or clean
+        cleaned = re.sub(r"(?i)^(các\s+)?đoạn\s+ocr\s+cho\s+thấy\s+", "", cleaned).strip()
+        if cleaned:
+            cleaned = cleaned[0].upper() + cleaned[1:]
+        return cleaned
 
     @staticmethod
     def _looks_like_catalog_summary(summary: str) -> bool:
@@ -423,6 +463,12 @@ Cấu trúc bắt buộc:
             "thuộc nhóm",
             "các chủ đề nổi bật gồm",
             "file pdf",
+            "đoạn ocr",
+            "các đoạn ocr",
+            "nguồn là ocr",
+            "pdf dạng ảnh",
+            "tránh suy diễn",
+            "chỉ sử dụng những ý đọc được",
             "thư viện",
             "project gutenberg",
             "legal small print",
@@ -462,6 +508,26 @@ Cấu trúc bắt buộc:
         unique_words = set(re.findall(r"[\wÀ-ỹ]+", lowered, flags=re.UNICODE))
         total_words = re.findall(r"[\wÀ-ỹ]+", lowered, flags=re.UNICODE)
         return bool(total_words) and len(unique_words) / len(total_words) < 0.38
+
+    @staticmethod
+    def _looks_english_dominant_summary(summary: str) -> bool:
+        words = re.findall(r"[A-Za-zÀ-ỹ]+", summary, flags=re.UNICODE)
+        if len(words) < 30:
+            return False
+
+        vietnamese_markers = re.findall(r"[ăâêôơưđáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]", summary.lower())
+        if len(vietnamese_markers) >= max(8, len(words) // 10):
+            return False
+
+        common_english = {
+            "a", "about", "and", "are", "as", "at", "be", "book", "by", "can", "case", "cases",
+            "chapter", "content", "describes", "discusses", "each", "for", "from", "has", "in",
+            "is", "it", "medical", "of", "on", "or", "patients", "people", "present", "that",
+            "the", "their", "this", "through", "to", "with",
+        }
+        normalized_words = [word.lower() for word in words]
+        english_hits = sum(word in common_english for word in normalized_words)
+        return english_hits / max(len(normalized_words), 1) >= 0.18
 
     @staticmethod
     def _coerce_audience(raw_audience: str, summary: str) -> str:

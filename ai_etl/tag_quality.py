@@ -72,6 +72,22 @@ GENERIC_TAGS = {
     "tri thức",
 }
 
+LOW_VALUE_PHRASE_TAGS = {
+    "bai toan chuyen nganh",
+    "kien thuc nen tang",
+    "noi dung chuyen nganh",
+    "phuong phap thuc hanh",
+    "tu duy ky thuat",
+    "tu duy phan tich",
+    "ung dung thuc te",
+    "domain problems",
+    "domain topics",
+    "engineering thinking",
+    "foundational knowledge",
+    "practical applications",
+    "practical methods",
+}
+
 CATALOG_LABELS = {
     "title",
     "subtitle",
@@ -101,6 +117,17 @@ TAG_ALIASES = {
     "big data": "Dữ Liệu Lớn",
     "programming": "Lập Trình",
     "computer programming": "Lập Trình",
+    "backend": "Lập Trình Backend",
+    "backend development": "Lập Trình Backend",
+    "back end": "Lập Trình Backend",
+    "server side": "Lập Trình Backend",
+    "server-side": "Lập Trình Backend",
+    "frontend": "Lập Trình Frontend",
+    "frontend development": "Lập Trình Frontend",
+    "front end": "Lập Trình Frontend",
+    "full stack": "Phát Triển Full Stack",
+    "full-stack": "Phát Triển Full Stack",
+    "rest api": "API Web",
     "algorithm analysis": "Phân Tích Thuật Toán",
     "analysis of algorithms": "Phân Tích Thuật Toán",
     "algorithm": "Thuật Toán",
@@ -158,7 +185,17 @@ VI_TAG_TRANSLATIONS = {
     "Mô Hình Dữ Liệu": "Data Modeling",
     "Dữ Liệu Lớn": "Big Data",
     "Lập Trình": "Programming",
+    "Lập Trình Backend": "Backend Development",
+    "Lập Trình Frontend": "Frontend Development",
+    "Phát Triển Full Stack": "Full Stack Development",
+    "API Web": "Web APIs",
     "Phân Tích Thuật Toán": "Algorithm Analysis",
+    "Phân Tích Độ Phức Tạp": "Complexity Analysis",
+    "Thiết Kế Thuật Toán": "Algorithm Design",
+    "Quy Hoạch Động": "Dynamic Programming",
+    "Thuật Toán Đồ Thị": "Graph Algorithms",
+    "Sắp Xếp Và Tìm Kiếm": "Sorting And Searching",
+    "Chứng Minh Độ Đúng": "Correctness Proofs",
     "Khoa Học Máy Tính": "Computer Science",
     "Thuật Toán": "Algorithms",
     "Cấu Trúc Dữ Liệu": "Data Structures",
@@ -199,6 +236,12 @@ VI_TAG_TRANSLATIONS = {
     "Tài Chính": "Finance",
     "Marketing": "Marketing",
     "Nghiên Cứu Khoa Học": "Research Methods",
+    "Dược Lý": "Pharmacology",
+    "Dược Học": "Pharmacy",
+    "Hóa Dược": "Medicinal Chemistry",
+    "Y Học Lâm Sàng": "Clinical Medicine",
+    "Sinh Lý Học": "Physiology",
+    "Sinh Hóa": "Biochemistry",
     "Kiến Thức Nền Tảng": "Foundational Knowledge",
     "Phương Pháp Thực Hành": "Practical Methods",
     "Ứng Dụng Thực Tế": "Practical Applications",
@@ -226,7 +269,7 @@ FALLBACK_CONCEPTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Đạo Đức Khoa Học", ("ethics of science", "human creativity", "creator", "responsibility")),
     ("Sách Khai Phóng", ("liberal education", "general education", "classic literature", "humanities")),
     ("Lãng Mạn", ("romance", "romantic", "courtship", "love", "lãng mạn")),
-    ("Châm Biếm Xã Hội", ("social satire", "manners", "class", "gentry", "satire", "châm biếm")),
+    ("Châm Biếm Xã Hội", ("social satire", "manners", "gentry", "satire", "châm biếm")),
     ("Quan Hệ Gia Đình", ("family", "sisters", "marriage", "gia đình", "hôn nhân")),
     ("Học Có Giám Sát", ("supervised learning", "labelled examples", "classification", "regression")),
     ("Học Không Giám Sát", ("unsupervised learning", "clustering", "dimensionality reduction", "principal component")),
@@ -247,7 +290,17 @@ FALLBACK_CONCEPTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Cơ Sở Dữ Liệu", ("database", "cơ sở dữ liệu", "relational")),
     ("Dữ Liệu Lớn", ("big data", "hadoop", "spark", "distributed data")),
     ("Lập Trình", ("programming", "computer programming", "sequential machines")),
+    ("Lập Trình Backend", ("backend", "back end", "server side", "server-side", "node.js", "node js", "express", "rest api", "api server")),
+    ("Lập Trình Frontend", ("frontend", "front end", "react", "redux", "dom", "browser application")),
+    ("Phát Triển Full Stack", ("full stack", "full-stack", "frontend and backend", "react node", "mern", "web development")),
+    ("API Web", ("rest api", "graphql", "web api", "api endpoint", "http api")),
     ("Phân Tích Thuật Toán", ("algorithm analysis", "analysis of algorithms", "algorithms and their analysis")),
+    ("Phân Tích Độ Phức Tạp", ("complexity analysis", "time complexity", "space complexity", "asymptotic", "big o", "running time", "độ phức tạp")),
+    ("Thiết Kế Thuật Toán", ("algorithm design", "design techniques", "divide and conquer", "greedy algorithm", "thiết kế thuật toán")),
+    ("Quy Hoạch Động", ("dynamic programming", "optimal substructure", "overlapping subproblems", "quy hoạch động")),
+    ("Thuật Toán Đồ Thị", ("graph algorithm", "graph algorithms", "shortest path", "minimum spanning tree", "network flow", "đồ thị")),
+    ("Sắp Xếp Và Tìm Kiếm", ("sorting", "searching", "binary search", "quick sort", "heapsort", "sắp xếp", "tìm kiếm")),
+    ("Chứng Minh Độ Đúng", ("correctness proof", "proof of correctness", "loop invariant", "invariant", "chứng minh độ đúng")),
     ("Khoa Học Máy Tính", ("computer science", "khoa học máy tính", "computer scientist")),
     ("Thuật Toán", ("algorithm", "algorithms", "thuật toán", "complexity", "dynamic programming")),
     ("Cấu Trúc Dữ Liệu", ("data structure", "cấu trúc dữ liệu", "tree", "graph", "hash table")),
@@ -288,6 +341,12 @@ FALLBACK_CONCEPTS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Tài Chính", ("finance", "investment", "portfolio", "capital")),
     ("Marketing", ("marketing", "brand", "consumer behavior", "market research")),
     ("Nghiên Cứu Khoa Học", ("research method", "methodology", "literature review")),
+    ("Dược Lý", ("pharmacology", "dược lý", "drug action", "drug therapy", "clinical pharmacology")),
+    ("Dược Học", ("pharmacy", "dược học", "pharmaceutical science", "pharmaceutics")),
+    ("Hóa Dược", ("medicinal chemistry", "hóa dược", "pharmaceutical chemistry")),
+    ("Y Học Lâm Sàng", ("clinical medicine", "clinical practice", "diagnosis", "treatment")),
+    ("Sinh Lý Học", ("physiology", "sinh lý học", "human physiology")),
+    ("Sinh Hóa", ("biochemistry", "sinh hóa", "metabolism", "enzyme")),
 )
 
 
@@ -333,6 +392,8 @@ def is_low_quality_tag(tag: str, publication_context: str = "") -> bool:
         return True
 
     key = normalize_key(clean)
+    if key in LOW_VALUE_PHRASE_TAGS:
+        return True
     if key in {normalize_key(item) for item in GENERIC_TAGS}:
         return True
 

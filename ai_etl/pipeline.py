@@ -13,8 +13,15 @@ from psycopg2.extensions import connection as PGConnection
 from .config import Settings
 from .db import Database
 from .embedding_client import EmbeddingClient
-from .llm_client import GeminiClient
-from .pdf_processing import Chunk, extract_pdf_text, sliding_window_chunk, strip_legal_and_publisher_boilerplate, strip_public_domain_boilerplate
+from .llm_client import GeminiClient, LLMResponseError
+from .pdf_processing import (
+    Chunk,
+    clean_ocr_artifacts,
+    extract_pdf_text,
+    sliding_window_chunk,
+    strip_legal_and_publisher_boilerplate,
+    strip_public_domain_boilerplate,
+)
 from .tag_quality import align_english_tags, dedupe_quality_tags, suggest_tags_from_text
 
 
@@ -117,17 +124,23 @@ class AIEtlPipeline:
             conn.rollback()
             raise
 
-        representative_chunks = self._select_representative_chunks(
-            chunks=chunks,
-            vectors=vectors,
-            max_chunks=self.settings.reduce_max_chunks,
-        )
-        reduce_inputs = self._apply_reduce_budget(representative_chunks)
-        if not reduce_inputs:
-            raise ValueError("No representative chunks available for reduce phase")
+        try:
+            representative_chunks = self._select_representative_chunks(
+                chunks=chunks,
+                vectors=vectors,
+                max_chunks=self.settings.reduce_max_chunks,
+            )
+            reduce_inputs = self._apply_reduce_budget(representative_chunks)
+            if not reduce_inputs:
+                raise ValueError("No representative chunks available for reduce phase")
 
-        publication_context = self.database.get_publication_context(conn, publication_id)
-        reduce_result = self._reduce_with_fallback(reduce_inputs, publication_context)
+            publication_context = self.database.get_publication_context(conn, publication_id)
+            reduce_result = self._reduce_with_fallback(reduce_inputs, publication_context)
+        except Exception as exc:
+            conn.rollback()
+            self.database.mark_publication_etl_failed(conn, publication_id, file_hash, str(exc))
+            conn.commit()
+            raise
 
         try:
             self.database.update_publication_summary(
@@ -224,15 +237,24 @@ class AIEtlPipeline:
         reduce_inputs: list[str],
         publication_context: str = "",
     ) -> dict[str, object]:
+        allow_fallback = bool(getattr(self.settings, "allow_metadata_fallback", False))
         try:
             result = self.llm_client.reduce_publication(reduce_inputs, publication_context)
             summary = str(result.get("master_summary") or "")
             if self._looks_like_catalog_or_low_value_summary(summary):
-                return self._fallback_reduce_publication(reduce_inputs, publication_context)
+                if allow_fallback:
+                    return self._fallback_reduce_publication(reduce_inputs, publication_context)
+                raise LLMResponseError("LLM returned a low-value summary; refusing to write fallback metadata")
             if self._is_literature_context(publication_context) and self._has_technical_generic_tags(result.get("tags", [])):
-                return self._fallback_reduce_publication(reduce_inputs, publication_context)
+                if allow_fallback:
+                    return self._fallback_reduce_publication(reduce_inputs, publication_context)
+                raise LLMResponseError("LLM returned tags inconsistent with the catalog context")
             return result
-        except Exception:
+        except Exception as exc:
+            if not allow_fallback:
+                raise LLMResponseError(
+                    "LLM metadata generation failed and AI_ETL_ALLOW_METADATA_FALLBACK is disabled"
+                ) from exc
             return self._fallback_reduce_publication(reduce_inputs, publication_context)
 
     def _fallback_reduce_publication(
@@ -306,9 +328,16 @@ class AIEtlPipeline:
         if self._is_literature_context(" ".join(context.values()) + " " + content_text):
             title = context.get("title", "").strip() or "Tác phẩm"
             if extractive_summary:
-                return self._normalize_summary(
-                    f"{title} mở ra một văn bản văn học xoay quanh nhân vật, quan hệ xã hội và những xung đột "
-                    f"được thể hiện qua các đoạn tiêu biểu: {extractive_summary}"
+                localized = self._fallback_content_overview_vi(
+                    fallback_tags=tags,
+                    extractive_summary=extractive_summary,
+                )
+                if localized:
+                    return localized
+                return self._generic_vietnamese_summary_from_tags(
+                    title=title,
+                    tag_text=tag_text,
+                    source_text=content_text,
                 )
             return self._normalize_summary(
                 f"{title} là một văn bản văn học cần được đọc qua nhân vật, bối cảnh xã hội, giọng kể và các "
@@ -325,7 +354,12 @@ class AIEtlPipeline:
             if base:
                 used_structured_fallback_summary = True
             else:
-                base = extractive_summary
+                base = self._generic_vietnamese_summary_from_tags(
+                    title=context.get("title", "").strip() or "Tài liệu",
+                    tag_text=tag_text,
+                    source_text=content_text,
+                )
+                used_structured_fallback_summary = True
         elif description:
             description = self._localize_known_description(description.rstrip("."))
             if self._normalize_text(description).startswith(("tai lieu", "khoa hoc", "giao trinh", "sach")):
@@ -334,26 +368,25 @@ class AIEtlPipeline:
                 base = f"{description}."
         else:
             base = (
-                f"Nội dung trích xuất hiện chỉ cho thấy các chủ đề nổi bật như {tag_text}. Cần thêm văn bản "
-                "đại diện hơn để tạo bản tóm tắt chi tiết mà không suy diễn."
+                f"Tài liệu xoay quanh các chủ đề nổi bật như {tag_text}, với trọng tâm là các khái niệm và kỹ năng "
+                "cốt lõi mà người đọc cần nắm khi tiếp cận lĩnh vực này."
             )
 
         if used_structured_fallback_summary:
             tail = ""
         elif faculty == "KHOA_QUAN_LY_CONG_NGHIEP":
             tail = (
-                " Các đoạn hiện có gợi ý giá trị về quản lý, giao tiếp, ra quyết định hoặc làm việc với con "
+                " Nội dung có giá trị về quản lý, giao tiếp, ra quyết định hoặc làm việc với con "
                 "người trong bối cảnh thực tế."
             )
         elif faculty == "KHOA_DIEN_DIEN_TU":
             tail = (
-                " Các đoạn hiện có gợi ý nội dung liên quan đến nguyên lý kỹ thuật, thành phần hệ thống, đo "
+                " Nội dung liên quan đến nguyên lý kỹ thuật, thành phần hệ thống, đo "
                 "lường hoặc thiết kế trong lĩnh vực điện, điện tử và cơ điện tử."
             )
         else:
             tail = (
-                f" Các đoạn hiện có gợi ý mối liên hệ với {tag_text}, nhưng bản tóm tắt này chỉ nên xem là "
-                "kết quả dự phòng khi mô hình ngôn ngữ không trả về metadata đạt chuẩn."
+                f" Nội dung giúp người đọc nhận diện rõ mối liên hệ với {tag_text} và định hướng những phần nên đọc sâu hơn."
             )
 
         return self._normalize_summary(base + tail)
@@ -365,6 +398,18 @@ class AIEtlPipeline:
 
         normalized = cls._normalize_text(extractive_summary)
         points: list[str] = []
+        if any(term in normalized for term in ("patient", "medical", "physician", "diagnos", "treating", "treatment")):
+            points.append(
+                "trải nghiệm y khoa, quan hệ giữa bác sĩ và bệnh nhân, cũng như cách bệnh tật làm thay đổi đời sống con người"
+            )
+        if any(term in normalized for term in ("memoir", "autobiography", "biography", "life", "death", "family", "relationship")):
+            points.append(
+                "chất tự truyện, suy tư về sự sống, cái chết, gia đình và các mối quan hệ cá nhân"
+            )
+        if any(term in normalized for term in ("novel", "fiction", "character", "social", "conflict", "romance")):
+            points.append(
+                "nhân vật, xung đột xã hội, cảm xúc cá nhân và cách câu chuyện phản ánh bối cảnh sống của con người"
+            )
         if "supervised learning" in normalized or "regression" in normalized or "classification" in normalized:
             points.append(
                 "học có giám sát, regression, classification và cách đánh giá khả năng khái quát hóa của mô hình"
@@ -392,7 +437,7 @@ class AIEtlPipeline:
             return ""
 
         tag_text = ", ".join(fallback_tags[:4]) if fallback_tags else "các chủ đề lập trình và khoa học máy tính"
-        sentences = [f"Các đoạn OCR cho thấy tài liệu tập trung vào {points[0]}."]
+        sentences = [f"Tài liệu tập trung vào {points[0]}."]
         if len(points) >= 3:
             sentences.append(f"Nội dung cũng đề cập đến {points[1]} và {points[2]}.")
             remaining = points[3:]
@@ -407,10 +452,28 @@ class AIEtlPipeline:
             sentences.append(f"Ngoài phần lý thuyết, tài liệu còn thể hiện {remaining[0]}.")
         else:
             sentences.append(f"Tài liệu phù hợp với người đọc đã có nền tảng nhất định và muốn học sâu hơn về {tag_text}.")
-        sentences.append(
-            "Do nguồn là OCR từ PDF dạng ảnh, bản tóm tắt này chỉ sử dụng những ý đọc được rõ ràng và tránh suy diễn ngoài văn bản."
-        )
         return cls._normalize_summary(" ".join(sentences))
+
+    @classmethod
+    def _generic_vietnamese_summary_from_tags(cls, title: str, tag_text: str, source_text: str) -> str:
+        normalized = cls._normalize_text(source_text)
+        if any(term in normalized for term in ("patient", "medical", "physician", "diagnos", "treatment")):
+            focus = (
+                "các trải nghiệm liên quan đến y khoa, bệnh nhân, chẩn đoán, điều trị và tác động của bệnh tật "
+                "đến đời sống cá nhân"
+            )
+        elif any(term in normalized for term in ("novel", "fiction", "character", "romance", "social")):
+            focus = "nhân vật, quan hệ xã hội, xung đột cảm xúc và bối cảnh sống được triển khai trong tác phẩm"
+        elif any(term in normalized for term in ("algorithm", "program", "computer", "data", "model")):
+            focus = "các khái niệm kỹ thuật, quy trình giải quyết vấn đề và nền tảng chuyên môn liên quan"
+        else:
+            focus = f"các chủ đề chính như {tag_text}"
+
+        return cls._normalize_summary(
+            f"{title} tập trung vào {focus}. "
+            "Phần nội dung được diễn đạt lại bằng tiếng Việt theo hướng ngắn gọn, giúp người đọc nhanh chóng nắm phạm vi kiến thức, "
+            "mức độ chuyên môn và giá trị sử dụng của tài liệu trước khi mượn hoặc đọc sâu hơn."
+        )
 
     @classmethod
     def _is_literature_context(cls, text: str) -> bool:
@@ -458,6 +521,7 @@ class AIEtlPipeline:
 
     @staticmethod
     def _clean_summary_source(text: str) -> str:
+        text = clean_ocr_artifacts(text)
         text = strip_legal_and_publisher_boilerplate(strip_public_domain_boilerplate(text))
         text = re.sub(
             r"(?i)\b(publication id|title|subtitle|language|publication year|authors|categories|tags|ai summary)\s*:[^.!?\n]*(?:[.!?]\s*)?",
@@ -513,6 +577,7 @@ class AIEtlPipeline:
 
     @staticmethod
     def _extractive_content_summary(text: str) -> str:
+        text = clean_ocr_artifacts(text)
         sentences = re.split(r"(?<=[.!?])\s+", text)
         blocked_terms = (
             "title:",
@@ -593,6 +658,12 @@ class AIEtlPipeline:
             "lập chỉ mục",
             "file pdf",
             "hệ thống ai",
+            "đoạn ocr",
+            "các đoạn ocr",
+            "nguồn là ocr",
+            "pdf dạng ảnh",
+            "tránh suy diễn",
+            "chỉ sử dụng những ý đọc được",
         )
         if any(term in lowered for term in blocked):
             return True
@@ -776,17 +847,32 @@ class AIEtlPipeline:
         if not chunks:
             return []
 
-        eligible_indices = [
-            index for index, chunk in enumerate(chunks)
-            if self._has_content_worth_summarizing([self._clean_summary_source(chunk.text)])
+        scored_candidates = [
+            (index, self._summary_source_quality_score(self._clean_summary_source(chunk.text)))
+            for index, chunk in enumerate(chunks)
         ]
-        if len(eligible_indices) >= min(3, len(chunks)):
+        eligible_indices = [
+            index for index, score in scored_candidates
+            if score >= 45 and self._has_content_worth_summarizing([self._clean_summary_source(chunks[index].text)])
+        ]
+        if len(eligible_indices) < min(3, len(chunks)):
+            eligible_indices = [
+                index for index, score in scored_candidates
+                if score >= 30 and self._has_content_worth_summarizing([self._clean_summary_source(chunks[index].text)])
+            ]
+        target_floor = min(max(1, max_chunks), len(chunks))
+        if len(eligible_indices) >= target_floor:
             chunks = [chunks[index] for index in eligible_indices]
             vectors = [vectors[index] for index in eligible_indices]
+            quality_scores = np.array([score for _index, score in scored_candidates if _index in set(eligible_indices)], dtype=np.float32)
+        else:
+            quality_scores = np.array([score for _index, score in scored_candidates], dtype=np.float32)
 
         embeddings = np.array(vectors, dtype=np.float32)
         if embeddings.ndim != 2 or embeddings.shape[0] != len(chunks):
-            return [chunk.text for chunk in chunks[: min(max_chunks, len(chunks))]]
+            ranked = sorted(range(len(chunks)), key=lambda idx: float(quality_scores[idx]) if idx < len(quality_scores) else 0.0, reverse=True)
+            selected = sorted(ranked[: min(max_chunks, len(ranked))])
+            return [chunks[idx].text for idx in selected]
 
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
         embeddings = np.divide(
@@ -806,24 +892,45 @@ class AIEtlPipeline:
 
         similarities = embeddings @ centroid
         selected: list[int] = []
+
+        if len(quality_scores) and float(np.max(quality_scores)) <= 0.0:
+            if total_chunks > 0:
+                selected.append(0)
+            if total_chunks > 1 and len(selected) < target:
+                selected.append(1)
+            centroid_idx = int(np.argmax(similarities))
+            if centroid_idx not in selected and len(selected) < target:
+                selected.append(centroid_idx)
+            candidate_indices = set(range(total_chunks))
+            candidate_indices.difference_update(selected)
+            while len(selected) < target and candidate_indices:
+                best_idx = max(candidate_indices, key=lambda idx: float(similarities[idx]))
+                selected.append(best_idx)
+                candidate_indices.remove(best_idx)
+            selected.sort()
+            return [chunks[idx].text for idx in selected]
+
         if total_chunks > 0:
-            selected.append(0)
-        if total_chunks > 1 and len(selected) < target:
-            selected.append(1)
+            opening_window = range(min(12, total_chunks))
+            opening_idx = max(
+                opening_window,
+                key=lambda idx: (float(quality_scores[idx]) if idx < len(quality_scores) else 0.0, float(similarities[idx])),
+            )
+            selected.append(opening_idx)
+
+        if len(selected) < target and total_chunks > 1:
+            quality_idx = int(np.argmax(quality_scores)) if len(quality_scores) else 0
+            if quality_idx not in selected:
+                selected.append(quality_idx)
 
         centroid_idx = int(np.argmax(similarities))
-        if centroid_idx not in selected:
+        if centroid_idx not in selected and len(selected) < target:
             selected.append(centroid_idx)
-        elif len(selected) < target and total_chunks > 1:
-            for candidate_idx in np.argsort(similarities)[::-1]:
-                candidate_idx = int(candidate_idx)
-                if candidate_idx not in selected:
-                    selected.append(candidate_idx)
-                    break
         candidate_indices = set(range(total_chunks))
         candidate_indices.difference_update(selected)
 
-        lambda_weight = 0.65
+        lambda_weight = 0.55
+        quality_norm = quality_scores / max(float(np.max(quality_scores)), 1.0) if len(quality_scores) else np.zeros(total_chunks)
         while len(selected) < target and candidate_indices:
             best_idx = None
             best_score = float("-inf")
@@ -831,7 +938,8 @@ class AIEtlPipeline:
             for idx in candidate_indices:
                 relevance = float(similarities[idx])
                 diversity_penalty = max(float(embeddings[idx] @ embeddings[s]) for s in selected)
-                score = lambda_weight * relevance - (1.0 - lambda_weight) * diversity_penalty
+                quality_bonus = float(quality_norm[idx]) if idx < len(quality_norm) else 0.0
+                score = lambda_weight * relevance + 0.30 * quality_bonus - 0.15 * diversity_penalty
                 if score > best_score:
                     best_score = score
                     best_idx = idx
@@ -844,6 +952,59 @@ class AIEtlPipeline:
 
         selected.sort()
         return [chunks[idx].text for idx in selected]
+
+    @classmethod
+    def _summary_source_quality_score(cls, text: str) -> float:
+        clean = cls._normalize_summary(text)
+        if len(clean) < 120:
+            return 0.0
+
+        lowered = clean.lower()
+        alpha_ratio = sum(ch.isalpha() for ch in clean) / max(len(clean), 1)
+        digit_ratio = sum(ch.isdigit() for ch in clean) / max(len(clean), 1)
+        symbol_ratio = sum(1 for ch in clean if ch in "=∑∫√≤≥<>|{}[]") / max(len(clean), 1)
+        sentences = [sentence for sentence in re.split(r"(?<=[.!?])\s+", clean) if len(sentence.strip()) >= 45]
+
+        score = 0.0
+        score += min(28.0, len(clean) / 55.0)
+        score += min(24.0, len(sentences) * 4.0)
+        score += max(0.0, (alpha_ratio - 0.50) * 55.0)
+
+        content_terms = (
+            "principle", "practice", "design", "method", "technique", "problem", "example",
+            "implementation", "architecture", "algorithm", "data", "model", "code", "program",
+            "refactor", "test", "function", "class", "object", "module", "system",
+            "nguyên lý", "phương pháp", "kỹ thuật", "thiết kế", "ví dụ", "bài toán",
+        )
+        score += min(18.0, sum(term in lowered for term in content_terms) * 3.0)
+
+        boilerplate_terms = (
+            "all rights reserved", "copyright", "isbn", "publisher", "published by",
+            "no liability", "warranty", "trademark", "permission", "printed in",
+            "cataloging-in-publication", "table of contents", "contents", "chapter ",
+            "references", "bibliography", "index", "preface", "acknowledg",
+            "release 2002", "doesn’t have money to buy",
+        )
+        score -= sum(term in lowered for term in boilerplate_terms) * 11.0
+
+        standalone_numbers = re.findall(r"\b\d{1,3}\b", clean)
+        chapter_refs = re.findall(r"\bchapter\s+\d+", lowered)
+        toc_markers = len(re.findall(r"\bchapter\s+\d+|\b\d{1,3}\s+[A-Z][A-Za-z]+|\b\d{1,3}\s*$", clean))
+        score -= min(28.0, toc_markers * 3.5)
+        if len(chapter_refs) >= 2:
+            score -= 40.0
+        if len(standalone_numbers) >= 5:
+            score -= 28.0
+        if len(chapter_refs) >= 2 and len(standalone_numbers) >= 4:
+            score -= 45.0
+        if digit_ratio > 0.16:
+            score -= 18.0
+        if symbol_ratio > 0.04:
+            score -= 18.0
+        if alpha_ratio < 0.55:
+            score -= 18.0
+
+        return max(0.0, min(100.0, score))
 
     def _apply_reduce_budget(self, texts: list[str]) -> list[str]:
         selected: list[str] = []

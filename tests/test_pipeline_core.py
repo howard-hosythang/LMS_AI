@@ -7,6 +7,7 @@ import pytest
 
 import ai_etl.pipeline as pipeline_module
 from ai_etl.pdf_processing import Chunk
+from ai_etl.llm_client import LLMResponseError
 from ai_etl.pipeline import AIEtlPipeline
 
 
@@ -58,6 +59,7 @@ def _pipeline(settings=None, llm=None, database=None) -> AIEtlPipeline:
         chunk_size=1500,
         chunk_overlap=150,
         enable_hash_skip=True,
+        allow_metadata_fallback=False,
         enable_ocr_fallback=True,
         ocr_max_pages=32,
         ocr_dpi=160,
@@ -93,6 +95,50 @@ def test_select_representative_chunks_keeps_opening_context_and_diverse_centroid
     assert len(selected) == 3
 
 
+def test_select_representative_chunks_prefers_content_over_front_matter() -> None:
+    pipeline = _pipeline()
+    chunks = [
+        Chunk(
+            "c00001",
+            "Copyright 2024 Publisher. All rights reserved. ISBN 123456789. "
+            "No liability is assumed by the publisher for incidental damages. "
+            "Table of contents Chapter 1 12 Chapter 2 35 Chapter 3 51.",
+        ),
+        Chunk(
+            "c00002",
+            "Chapter 4 75 The Purpose of Formatting 76 Vertical Openness 77 "
+            "Chapter 6 Objects and Data Structures 95 Chapter 7 Error Handling 103.",
+        ),
+        Chunk(
+            "c00003",
+            "Refactoring improves the design of existing code by changing internal structure without changing "
+            "observable behavior. The text explains how tests protect each small transformation, how code smells "
+            "reveal design problems, and how programmers can move methods, extract classes, and simplify conditionals "
+            "in a controlled sequence of steps.",
+        ),
+        Chunk(
+            "c00004",
+            "Clean code emphasizes names, functions, error handling, tests, and boundaries so that a software system "
+            "can remain understandable while it evolves. The discussion connects daily programming discipline with "
+            "professional responsibility, maintainability, and the cost of leaving bad code inside a project.",
+        ),
+    ]
+    vectors = [
+        [1.0, 0.0, 0.0],
+        [0.9, 0.1, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.9, 0.1],
+    ]
+
+    selected = pipeline._select_representative_chunks(chunks, vectors, max_chunks=2)
+
+    joined = " ".join(selected).lower()
+    assert "copyright" not in joined
+    assert "table of contents" not in joined
+    assert "refactoring improves" in joined
+    assert "clean code emphasizes" in joined
+
+
 def test_apply_reduce_budget_cleans_and_stops_before_total_budget() -> None:
     pipeline = _pipeline(SimpleNamespace(reduce_max_chars_per_chunk=15, reduce_total_chars_budget=32))
 
@@ -123,8 +169,35 @@ def test_reduce_with_fallback_uses_llm_result_when_available() -> None:
     assert pipeline._reduce_with_fallback(["content"], "") == expected
 
 
-def test_reduce_with_fallback_generates_quality_tags_when_llm_fails() -> None:
+def test_reduce_with_fallback_rejects_llm_failures_by_default() -> None:
     pipeline = _pipeline(llm=FakeLlm(should_fail=True))
+
+    with pytest.raises(LLMResponseError, match="FALLBACK is disabled"):
+        pipeline._reduce_with_fallback(
+            [
+                "Supervised learning studies labelled examples, regression, classification, feature engineering, "
+                "model validation, overfitting control and error analysis for prediction workflows."
+            ],
+            "Title: Machine Learning cơ bản\nCategories: Công Nghệ Thông Tin",
+        )
+
+
+def test_reduce_with_fallback_can_be_enabled_explicitly() -> None:
+    settings = SimpleNamespace(
+        reduce_max_chunks=8,
+        reduce_max_chars_per_chunk=20,
+        reduce_total_chars_budget=42,
+        chunk_size=1500,
+        chunk_overlap=150,
+        enable_hash_skip=True,
+        allow_metadata_fallback=True,
+        enable_ocr_fallback=True,
+        ocr_max_pages=32,
+        ocr_dpi=160,
+        ocr_language="eng+vie",
+        ocr_min_text_chars=500,
+    )
+    pipeline = _pipeline(settings=settings, llm=FakeLlm(should_fail=True))
 
     result = pipeline._reduce_with_fallback(
         [

@@ -64,6 +64,24 @@ def test_ai_tag_quality_filters_title_category_and_generic_terms() -> None:
 
     assert tags == ["Học Có Giám Sát", "Kỹ Thuật Đặc Trưng", "Đánh Giá Mô Hình"]
     assert is_low_quality_tag("Publication")
+    assert is_low_quality_tag("Nội Dung Chuyên Ngành")
+    assert is_low_quality_tag("Phương Pháp Thực Hành")
+    assert is_low_quality_tag("Ứng Dụng Thực Tế")
+
+
+def test_medical_fallback_tags_are_specific_enough() -> None:
+    tags = dedupe_quality_tags(
+        GeminiClient._fallback_tags_from_text(
+            "Giáo trình dược lý trình bày pharmacology, cơ chế drug action, drug therapy "
+            "và clinical pharmacology trong thực hành điều trị."
+        ),
+        "",
+        limit=5,
+    )
+
+    assert "Dược Lý" in tags
+    assert "Dược Học" not in tags
+    assert "Nội Dung Chuyên Ngành" not in tags
 
 
 def test_fallback_summary_uses_pdf_content_not_catalog_fields() -> None:
@@ -115,6 +133,21 @@ def test_catalog_description_can_infer_programming_algorithm_tags() -> None:
     assert "Lập Trình" in tags
     assert "Phân Tích Thuật Toán" in tags
     assert "Thuật Toán" in tags
+
+
+def test_full_stack_backend_tags_require_web_stack_signals() -> None:
+    tags = dedupe_quality_tags(
+        GeminiClient._fallback_tags_from_text(
+            "Full-stack web development course using React, Redux, Node.js, MongoDB, TypeScript, GraphQL and REST API."
+        ),
+        "",
+        limit=5,
+    )
+
+    assert "Phát Triển Full Stack" in tags
+    assert "Lập Trình Backend" in tags
+    assert "API Web" in tags
+    assert "Khoa Học Máy Tính" not in tags
 
 
 def test_gutenberg_boilerplate_is_removed_before_ai_reduce() -> None:
@@ -177,3 +210,23 @@ def test_literature_fallback_does_not_generate_engineering_metadata() -> None:
         "Quan Hệ Gia Đình",
     }
     assert "Ứng Dụng Thực Tế" not in result["tags"]
+
+
+def test_fallback_summary_translates_english_medical_memoir_excerpt_to_vietnamese() -> None:
+    pipeline = AIEtlPipeline.__new__(AIEtlPipeline)
+
+    result = pipeline._fallback_reduce_publication(
+        [
+            "When Breath Becomes Air describes medical cases, patients, physicians, diagnoses, treatment, "
+            "family relationships, friendship and changes made to names and identifying details. "
+            "The memoir reflects on life, death, illness and the human side of clinical care."
+        ],
+        "Title: When Breath Becomes Air\nAuthors: Paul Kalanithi\nCategories: Biography & Autobiography",
+    )
+
+    summary = str(result["master_summary"])
+
+    assert "When Breath Becomes Air describes" not in summary
+    assert "patients, physicians" not in summary
+    assert "bệnh nhân" in summary or "y khoa" in summary
+    assert "sự sống" in summary or "cái chết" in summary

@@ -133,10 +133,14 @@ def _semantic_search_publication_ids(
     app_state: AppState,
     query_vector: list[float],
     limit: int,
+    min_similarity: float | None = None,
 ) -> list[int]:
     vector_literal = _vector_to_pg_literal(query_vector)
     candidate_limit = max(limit * 20, 100)
-    max_distance = 1.0 - app_state.settings.search_min_similarity
+    similarity_threshold = (
+        min_similarity if min_similarity is not None else app_state.settings.search_min_similarity
+    )
+    max_distance = 1.0 - similarity_threshold
 
     with _pooled_connection(app_state) as conn:
         with conn.cursor() as cur:
@@ -163,13 +167,22 @@ def _semantic_search_publication_ids(
 
 def _chunk_keyword_search(app_state: AppState, query_text: str, limit: int) -> list[int]:
     query_text = " ".join(query_text.strip().split())
+    phrases = _expanded_search_phrases(query_text)
+    if query_text and query_text.lower() not in {phrase.lower() for phrase in phrases}:
+        phrases.insert(0, query_text)
     query_terms = _meaningful_query_terms(query_text)
-    if not query_text or not query_terms:
+
+    if not phrases:
         return []
 
-    phrase_like = f"%{query_text}%"
-    term_likes = [f"%{term}%" for term in query_terms]
-    term_conditions = " AND ".join(["pv.chunk_text ILIKE %s" for _term in query_terms])
+    phrase_likes = [f"%{phrase}%" for phrase in phrases]
+    phrase_conditions = " OR ".join(["pv.chunk_text ILIKE %s" for _phrase in phrases])
+    term_likes = [f"%{term}%" for term in query_terms] if len(query_terms) >= 2 else []
+    term_conditions = " AND ".join(["pv.chunk_text ILIKE %s" for _term in term_likes])
+    where_conditions = [f"({phrase_conditions})"]
+    if term_conditions:
+        where_conditions.append(f"({term_conditions})")
+    where_sql = " OR ".join(where_conditions)
 
     with _pooled_connection(app_state) as conn:
         with conn.cursor() as cur:
@@ -178,12 +191,11 @@ def _chunk_keyword_search(app_state: AppState, query_text: str, limit: int) -> l
                 f"""
                 SELECT
                     pv.publication_id,
-                    COUNT(*) FILTER (WHERE pv.chunk_text ILIKE %s) AS phrase_hits,
+                    COUNT(*) FILTER (WHERE {phrase_conditions}) AS phrase_hits,
                     COUNT(*) AS chunk_hits,
                     MIN(pv.id) AS first_hit_id
                 FROM ai_engine.publication_vectors pv
-                WHERE pv.chunk_text ILIKE %s
-                   OR ({term_conditions})
+                WHERE {where_sql}
                 GROUP BY pv.publication_id
                 ORDER BY
                     phrase_hits DESC,
@@ -191,7 +203,7 @@ def _chunk_keyword_search(app_state: AppState, query_text: str, limit: int) -> l
                     first_hit_id ASC
                 LIMIT %s
                 """,
-                (phrase_like, phrase_like, *term_likes, limit),
+                (*phrase_likes, *phrase_likes, *term_likes, limit),
             )
             return [int(row[0]) for row in cur.fetchall()]
 
@@ -548,17 +560,41 @@ def _get_trending_books(app_state: AppState, limit: int) -> list[int]:
 def _normalize_search_text(value: str) -> str:
     normalized = unicodedata.normalize("NFD", value.lower())
     without_marks = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
-    return " ".join(without_marks.replace("đ", "d").split())
+    without_marks = without_marks.replace("đ", "d")
+    without_marks = re.sub(r"[^a-z0-9+#]+", " ", without_marks)
+    return " ".join(without_marks.split())
 
 
 def _tokenize_search_text(value: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", _normalize_search_text(value))
 
 
+_QUERY_TERM_STOPWORDS = {
+    "cac",
+    "can",
+    "cho",
+    "cua",
+    "duoc",
+    "hoc",
+    "kiem",
+    "minh",
+    "mot",
+    "muon",
+    "nhung",
+    "sach",
+    "tai",
+    "tap",
+    "the",
+    "tim",
+    "trong",
+    "voi",
+}
+
+
 def _meaningful_query_terms(query_text: str) -> list[str]:
     return [
         term for term in _tokenize_search_text(query_text)
-        if len(term) >= 3
+        if len(term) >= 3 and term not in _QUERY_TERM_STOPWORDS
     ]
 
 
@@ -571,8 +607,48 @@ _QUERY_EXPANSIONS: dict[str, tuple[str, ...]] = {
     "thi giac may tinh": ("computer vision",),
     "co so du lieu": ("database", "databases"),
     "lap trinh web": ("web development",),
+    "backend": (
+        "back end",
+        "server side",
+        "server-side",
+        "backend development",
+        "api",
+        "rest api",
+        "node js",
+        "node.js",
+        "express",
+        "mongodb",
+        "full stack",
+        "web development",
+    ),
+    "back end": (
+        "backend",
+        "server side",
+        "api",
+        "rest api",
+        "node js",
+        "full stack",
+        "web development",
+    ),
+    "full stack": (
+        "full-stack",
+        "web development",
+        "frontend",
+        "backend",
+        "react",
+        "node js",
+        "node.js",
+        "mongodb",
+        "graphql",
+    ),
     "thuat toan": ("algorithm", "algorithms"),
     "cau truc du lieu": ("data structures",),
+    "duoc ly": ("pharmacology", "drug action", "drug therapy", "clinical pharmacology"),
+    "duoc hoc": ("pharmacy", "pharmaceutical science", "pharmaceutics"),
+    "hoa duoc": ("medicinal chemistry", "pharmaceutical chemistry"),
+    "y hoc": ("medicine", "medical science", "clinical medicine"),
+    "sinh ly": ("physiology",),
+    "sinh hoa": ("biochemistry",),
 }
 
 
@@ -626,8 +702,6 @@ def _metadata_relevance_score(query_text: str, fields: dict[str, str]) -> int:
             score += 8
 
     query_terms = set(_meaningful_query_terms(query_text))
-    for phrase in phrases[1:]:
-        query_terms.update(term for term in phrase.split() if len(term) >= 3)
     if not query_terms:
         return score
 
@@ -703,7 +777,6 @@ def _keyword_fallback_search(app_state: AppState, query_text: str, limit: int) -
 def _prefer_keyword_first(query_text: str) -> bool:
     terms = _normalize_search_text(query_text).split()
     return len(terms) <= 4
-
 
 
 def _persist_recommendations(
@@ -1052,14 +1125,22 @@ def semantic_search(request: SemanticSearchRequest) -> SemanticSearchResponse:
     )
 
     try:
+        keyword_ids = _keyword_fallback_search(app_state, request.query_text, limit)
+        chunk_keyword_ids = _chunk_keyword_search(app_state, request.query_text, limit)
+
         if _has_publication_vectors(app_state):
             vector = app_state.embedding_model.encode(request.query_text, normalize_embeddings=True)
-            semantic_ids = _semantic_search_publication_ids(app_state, vector.tolist(), limit)
+            if _prefer_keyword_first(request.query_text):
+                semantic_ids = []
+            else:
+                semantic_ids = _semantic_search_publication_ids(
+                    app_state,
+                    vector.tolist(),
+                    limit,
+                )
         else:
             semantic_ids = []
 
-        keyword_ids = _keyword_fallback_search(app_state, request.query_text, limit)
-        chunk_keyword_ids = _chunk_keyword_search(app_state, request.query_text, limit)
         if _prefer_keyword_first(request.query_text):
             publication_ids = _merge_ranked_unique(
                 _merge_ranked_unique(keyword_ids, chunk_keyword_ids, limit),

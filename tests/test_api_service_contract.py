@@ -24,6 +24,7 @@ def _install_app_state(settings=None) -> SimpleNamespace:
         settings=settings or SimpleNamespace(
             default_search_limit=10,
             max_search_limit=50,
+            search_strict_min_similarity=0.62,
             default_recommend_limit=10,
             max_recommend_limit=50,
         ),
@@ -45,6 +46,9 @@ def test_query_tokenization_is_accent_insensitive_and_filters_short_terms() -> N
         "artificial intelligence",
         "ai",
     ]
+    assert "pharmacology" in api_service._expanded_search_phrases("Dược lý")
+    assert "node js" in api_service._expanded_search_phrases("mình muốn học backend")
+    assert api_service._meaningful_query_terms("mình muốn học backend") == ["backend"]
     assert api_service._prefer_keyword_first("web development") is True
     assert api_service._prefer_keyword_first("advanced neural information retrieval systems") is False
 
@@ -77,6 +81,51 @@ def test_metadata_relevance_ranks_exact_translated_title_above_broad_ai_category
     assert aima_score > machine_learning_score
 
 
+def test_pharmacology_query_does_not_match_common_vietnamese_duoc_word() -> None:
+    score = api_service._metadata_relevance_score(
+        "dược lý",
+        {
+            "title": "Full Stack Open",
+            "authors": "Matti Luukkainen",
+            "categories": "Lập Trình Web",
+            "description": "Được dùng trong chương trình đại học về React, Node.js và GraphQL.",
+            "summary": "",
+            "tags": "Lập Trình",
+        },
+    )
+
+    assert score == 0
+
+
+def test_backend_intent_ranks_full_stack_metadata_above_broad_cs_overview() -> None:
+    query = "mình muốn học backend"
+    full_stack_score = api_service._metadata_relevance_score(
+        query,
+        {
+            "title": "Full Stack Open",
+            "authors": "University of Helsinki",
+            "categories": "Lập Trình Web",
+            "description": "Khóa học full-stack miễn phí: React, Redux, Node.js, MongoDB, TypeScript, GraphQL.",
+            "summary": "",
+            "tags": "Lập Trình Web",
+        },
+    )
+    overview_score = api_service._metadata_relevance_score(
+        query,
+        {
+            "title": "Computer Science Illuminated",
+            "authors": "Nell Dale",
+            "categories": "Công Nghệ Thông Tin, Khoa Học Máy Tính Cơ Bản",
+            "description": "Cái nhìn tổng quan về khoa học máy tính, phần cứng, hệ điều hành, mạng và bảo mật.",
+            "summary": "",
+            "tags": "",
+        },
+    )
+
+    assert full_stack_score > 0
+    assert full_stack_score > overview_score
+
+
 def test_merge_ranked_unique_preserves_rank_and_limit() -> None:
     assert api_service._merge_ranked_unique([1, 2, 3], [3, 4, 5], limit=4) == [1, 2, 3, 4]
 
@@ -93,8 +142,28 @@ def test_semantic_search_prefers_lexical_results_for_short_queries(monkeypatch) 
 
     response = api_service.semantic_search(api_service.SemanticSearchRequest(query_text="web development", limit=5))
 
-    assert response.publication_ids == [1, 2, 8, 3, 9]
-    assert log_calls == [("web development", [1, 2, 8, 3, 9])]
+    assert response.publication_ids == [1, 2, 8, 3]
+    assert log_calls == [("web development", [1, 2, 8, 3])]
+
+
+def test_semantic_search_does_not_guess_semantic_results_for_short_queries_without_lexical_signal(monkeypatch) -> None:
+    _install_app_state()
+    calls: list[str] = []
+
+    def fake_semantic(*_args, **_kwargs):
+        calls.append("called")
+        return [8, 9]
+
+    monkeypatch.setattr(api_service, "_has_publication_vectors", lambda _state: True)
+    monkeypatch.setattr(api_service, "_semantic_search_publication_ids", fake_semantic)
+    monkeypatch.setattr(api_service, "_keyword_fallback_search", lambda _state, _query, _limit: [])
+    monkeypatch.setattr(api_service, "_chunk_keyword_search", lambda _state, _query, _limit: [])
+    monkeypatch.setattr(api_service, "_log_search", lambda *_args: None)
+
+    response = api_service.semantic_search(api_service.SemanticSearchRequest(query_text="dược lý", limit=5))
+
+    assert response.publication_ids == []
+    assert calls == []
 
 
 def test_semantic_search_prefers_semantic_chunk_order_for_long_queries(monkeypatch) -> None:
@@ -117,6 +186,7 @@ def test_semantic_search_caps_requested_limit_to_configured_max(monkeypatch) -> 
     settings = SimpleNamespace(
         default_search_limit=10,
         max_search_limit=3,
+        search_strict_min_similarity=0.62,
         default_recommend_limit=10,
         max_recommend_limit=50,
     )
@@ -143,7 +213,7 @@ def test_semantic_search_caps_requested_limit_to_configured_max(monkeypatch) -> 
 
     response = api_service.semantic_search(api_service.SemanticSearchRequest(query_text="web", limit=100))
 
-    assert downstream_limits == [3, 3, 3]
+    assert downstream_limits == [3, 3]
     assert response.publication_ids == [1, 2, 3]
 
 

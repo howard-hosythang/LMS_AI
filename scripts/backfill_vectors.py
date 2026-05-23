@@ -48,6 +48,7 @@ def main() -> None:
                 SELECT id, file_url
                 FROM public.publications
                 WHERE file_url IS NOT NULL
+                  AND length(btrim(file_url)) > 0
                 ORDER BY id
                 """
             )
@@ -84,7 +85,14 @@ def main() -> None:
             processed += 1
             try:
                 pdf_source = Path(file_url) if not file_url.startswith(("http://", "https://")) else file_url
-                full_text = extract_pdf_text(pdf_source)
+                full_text = extract_pdf_text(
+                    pdf_source,
+                    enable_ocr_fallback=settings.enable_ocr_fallback,
+                    ocr_max_pages=settings.ocr_max_pages,
+                    ocr_dpi=settings.ocr_dpi,
+                    ocr_language=settings.ocr_language,
+                    ocr_min_text_chars=settings.ocr_min_text_chars,
+                )
                 chunks = sliding_window_chunk(
                     text=full_text,
                     chunk_size=settings.chunk_size,
@@ -104,7 +112,13 @@ def main() -> None:
                     for start in range(0, len(vector_rows), settings.vector_insert_batch_size):
                         batch_rows = vector_rows[start : start + settings.vector_insert_batch_size]
                         database.bulk_insert_vectors(conn, publication_id, batch_rows)
-                    database.upsert_publication_file_hash(conn, publication_id, "vector-only-backfill")
+                    database.upsert_publication_file_hash(
+                        conn,
+                        publication_id,
+                        "vector-only-backfill",
+                        chunks_count=len(chunks),
+                        vectors_count=len(vectors),
+                    )
                     conn.commit()
 
                 successes += 1
