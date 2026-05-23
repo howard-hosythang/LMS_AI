@@ -95,6 +95,15 @@ class GeminiClient:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _safe_error_message(exc: Exception | None) -> str:
+        if exc is None:
+            return "unknown error"
+
+        message = str(exc)
+        message = re.sub(r"([?&]key=)[^&\s]+", r"\1<redacted>", message)
+        return message
+
     def _call(self, prompt: str, model: str) -> str:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
@@ -138,7 +147,9 @@ class GeminiClient:
                         backoff = max(backoff, 5.0)
                 time.sleep(backoff + random.uniform(0.0, 0.5))
 
-        raise LLMResponseError(f"LLM API failed after {self.retry_attempts} attempts: {last_error}")
+        raise LLMResponseError(
+            f"LLM API failed after {self.retry_attempts} attempts: {self._safe_error_message(last_error)}"
+        )
 
     @staticmethod
     def _extract_text(body: dict[str, Any]) -> str:

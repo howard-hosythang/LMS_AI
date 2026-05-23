@@ -49,6 +49,18 @@ def test_extract_text_requires_candidates_parts_and_text() -> None:
         GeminiClient._extract_text({"candidates": [{"content": {"parts": [{"text": ""}]}}]})
 
 
+def test_safe_error_message_redacts_gemini_api_key() -> None:
+    message = (
+        "400 Client Error: Bad Request for url: "
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent?key=secret-api-key"
+    )
+
+    sanitized = GeminiClient._safe_error_message(RuntimeError(message))
+
+    assert "secret-api-key" not in sanitized
+    assert "key=<redacted>" in sanitized
+
+
 def test_reduce_once_filters_tags_aligns_english_aliases_and_coerces_audience() -> None:
     client = StubGeminiClient([
         json.dumps({
