@@ -49,7 +49,7 @@ def load_api_settings() -> ApiSettings:
         default_search_limit=int(os.getenv("AI_API_DEFAULT_SEARCH_LIMIT", "10")),
         max_search_limit=int(os.getenv("AI_API_MAX_SEARCH_LIMIT", "50")),
         search_min_similarity=float(os.getenv("AI_API_SEARCH_MIN_SIMILARITY", "0.50")),
-        search_strict_min_similarity=float(os.getenv("AI_API_SEARCH_STRICT_MIN_SIMILARITY", "0.62")),
+        search_strict_min_similarity=float(os.getenv("AI_API_SEARCH_STRICT_MIN_SIMILARITY", "0.68")),
         default_recommend_limit=int(os.getenv("AI_API_RECOMMEND_DEFAULT_LIMIT", "10")),
         max_recommend_limit=int(os.getenv("AI_API_RECOMMEND_MAX_LIMIT", "50")),
         als_factors=int(os.getenv("AI_API_ALS_FACTORS", "32")),

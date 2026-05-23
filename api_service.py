@@ -774,11 +774,6 @@ def _keyword_fallback_search(app_state: AppState, query_text: str, limit: int) -
     return [publication_id for publication_id, _score, _rank in scored[:limit]]
 
 
-def _prefer_keyword_first(query_text: str) -> bool:
-    terms = _normalize_search_text(query_text).split()
-    return len(terms) <= 4
-
-
 def _persist_recommendations(
     app_state: AppState,
     user_id: int,
@@ -1136,29 +1131,20 @@ def semantic_search(request: SemanticSearchRequest) -> SemanticSearchResponse:
 
         if _has_publication_vectors(app_state):
             vector = app_state.embedding_model.encode(request.query_text, normalize_embeddings=True)
-            if _prefer_keyword_first(request.query_text):
-                semantic_ids = []
-            else:
-                semantic_ids = _semantic_search_publication_ids(
-                    app_state,
-                    vector.tolist(),
-                    limit,
-                )
+            semantic_ids = _semantic_search_publication_ids(
+                app_state,
+                vector.tolist(),
+                limit,
+                min_similarity=app_state.settings.search_strict_min_similarity,
+            )
         else:
             semantic_ids = []
 
-        if _prefer_keyword_first(request.query_text):
-            publication_ids = _merge_ranked_unique(
-                _merge_ranked_unique(keyword_ids, chunk_keyword_ids, limit),
-                semantic_ids,
-                limit,
-            )
-        else:
-            publication_ids = _merge_ranked_unique(
-                _merge_ranked_unique(chunk_keyword_ids, semantic_ids, limit),
-                keyword_ids,
-                limit,
-            )
+        publication_ids = _merge_ranked_unique(
+            _merge_ranked_unique(keyword_ids, chunk_keyword_ids, limit),
+            semantic_ids,
+            limit,
+        )
 
         _log_search(app_state, request.query_text, publication_ids)
         return SemanticSearchResponse(publication_ids=publication_ids)

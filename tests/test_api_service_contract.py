@@ -24,7 +24,7 @@ def _install_app_state(settings=None) -> SimpleNamespace:
         settings=settings or SimpleNamespace(
             default_search_limit=10,
             max_search_limit=50,
-            search_strict_min_similarity=0.62,
+            search_strict_min_similarity=0.68,
             default_recommend_limit=10,
             max_recommend_limit=50,
         ),
@@ -49,8 +49,6 @@ def test_query_tokenization_is_accent_insensitive_and_filters_short_terms() -> N
     assert "pharmacology" in api_service._expanded_search_phrases("Dược lý")
     assert "node js" in api_service._expanded_search_phrases("mình muốn học backend")
     assert api_service._meaningful_query_terms("mình muốn học backend") == ["backend"]
-    assert api_service._prefer_keyword_first("web development") is True
-    assert api_service._prefer_keyword_first("advanced neural information retrieval systems") is False
 
 
 def test_metadata_relevance_ranks_exact_translated_title_above_broad_ai_category() -> None:
@@ -133,26 +131,32 @@ def test_merge_ranked_unique_preserves_rank_and_limit() -> None:
 def test_semantic_search_prefers_lexical_results_for_short_queries(monkeypatch) -> None:
     _install_app_state()
     log_calls: list[tuple[str, list[int]]] = []
+    semantic_calls: list[float | None] = []
 
     monkeypatch.setattr(api_service, "_has_publication_vectors", lambda _state: True)
-    monkeypatch.setattr(api_service, "_semantic_search_publication_ids", lambda _state, _vector, _limit: [8, 9])
+    monkeypatch.setattr(
+        api_service,
+        "_semantic_search_publication_ids",
+        lambda _state, _vector, _limit, min_similarity=None: semantic_calls.append(min_similarity) or [8, 9],
+    )
     monkeypatch.setattr(api_service, "_keyword_fallback_search", lambda _state, _query, _limit: [1, 2, 8])
     monkeypatch.setattr(api_service, "_chunk_keyword_search", lambda _state, _query, _limit: [3, 2])
     monkeypatch.setattr(api_service, "_log_search", lambda _state, query, ids: log_calls.append((query, ids)))
 
     response = api_service.semantic_search(api_service.SemanticSearchRequest(query_text="web development", limit=5))
 
-    assert response.publication_ids == [1, 2, 8, 3]
-    assert log_calls == [("web development", [1, 2, 8, 3])]
+    assert response.publication_ids == [1, 2, 8, 3, 9]
+    assert log_calls == [("web development", [1, 2, 8, 3, 9])]
+    assert semantic_calls == [0.68]
 
 
-def test_semantic_search_does_not_guess_semantic_results_for_short_queries_without_lexical_signal(monkeypatch) -> None:
+def test_semantic_search_requires_strict_vector_match_without_lexical_signal(monkeypatch) -> None:
     _install_app_state()
-    calls: list[str] = []
+    thresholds: list[float | None] = []
 
-    def fake_semantic(*_args, **_kwargs):
-        calls.append("called")
-        return [8, 9]
+    def fake_semantic(_state, _vector, _limit, min_similarity=None):
+        thresholds.append(min_similarity)
+        return []
 
     monkeypatch.setattr(api_service, "_has_publication_vectors", lambda _state: True)
     monkeypatch.setattr(api_service, "_semantic_search_publication_ids", fake_semantic)
@@ -163,14 +167,18 @@ def test_semantic_search_does_not_guess_semantic_results_for_short_queries_witho
     response = api_service.semantic_search(api_service.SemanticSearchRequest(query_text="dược lý", limit=5))
 
     assert response.publication_ids == []
-    assert calls == []
+    assert thresholds == [0.68]
 
 
-def test_semantic_search_prefers_semantic_chunk_order_for_long_queries(monkeypatch) -> None:
+def test_semantic_search_keeps_keyword_first_for_long_queries(monkeypatch) -> None:
     _install_app_state()
 
     monkeypatch.setattr(api_service, "_has_publication_vectors", lambda _state: True)
-    monkeypatch.setattr(api_service, "_semantic_search_publication_ids", lambda _state, _vector, _limit: [40, 41])
+    monkeypatch.setattr(
+        api_service,
+        "_semantic_search_publication_ids",
+        lambda _state, _vector, _limit, min_similarity=None: [40, 41],
+    )
     monkeypatch.setattr(api_service, "_keyword_fallback_search", lambda _state, _query, _limit: [1, 40])
     monkeypatch.setattr(api_service, "_chunk_keyword_search", lambda _state, _query, _limit: [30, 31])
     monkeypatch.setattr(api_service, "_log_search", lambda *_args: None)
@@ -179,14 +187,14 @@ def test_semantic_search_prefers_semantic_chunk_order_for_long_queries(monkeypat
         api_service.SemanticSearchRequest(query_text="advanced neural information retrieval systems", limit=5)
     )
 
-    assert response.publication_ids == [30, 31, 40, 41, 1]
+    assert response.publication_ids == [1, 40, 30, 31, 41]
 
 
 def test_semantic_search_caps_requested_limit_to_configured_max(monkeypatch) -> None:
     settings = SimpleNamespace(
         default_search_limit=10,
         max_search_limit=3,
-        search_strict_min_similarity=0.62,
+        search_strict_min_similarity=0.68,
         default_recommend_limit=10,
         max_recommend_limit=50,
     )
@@ -197,7 +205,7 @@ def test_semantic_search_caps_requested_limit_to_configured_max(monkeypatch) -> 
     monkeypatch.setattr(
         api_service,
         "_semantic_search_publication_ids",
-        lambda _state, _vector, limit: downstream_limits.append(limit) or [8, 9, 10, 11],
+        lambda _state, _vector, limit, min_similarity=None: downstream_limits.append(limit) or [8, 9, 10, 11],
     )
     monkeypatch.setattr(
         api_service,
@@ -213,7 +221,7 @@ def test_semantic_search_caps_requested_limit_to_configured_max(monkeypatch) -> 
 
     response = api_service.semantic_search(api_service.SemanticSearchRequest(query_text="web", limit=100))
 
-    assert downstream_limits == [3, 3]
+    assert downstream_limits == [3, 3, 3]
     assert response.publication_ids == [1, 2, 3]
 
 
