@@ -14,6 +14,7 @@ from ai_etl.db import DatabaseConnectionPool
 from ai_etl.embedding_client import EmbeddingClient
 from ai_etl.llm_client import GeminiClient
 from ai_etl.pipeline import AIEtlPipeline
+from ai_etl.pdf_processing import Chunk, extract_pdf_text, sliding_window_chunk
 from ai_gateway.config import ApiSettings, load_api_settings
 from ai_gateway.recommender import RecommenderEngine
 from fastapi import FastAPI, HTTPException
@@ -76,6 +77,24 @@ class ProcessPublicationResponse(BaseModel):
     error: str | None = None
 
 
+class VectorizePublicationResponse(BaseModel):
+    publication_id: int
+    status: str
+    chunks: int
+    vectors: int
+    error: str | None = None
+
+
+class MetadataPublicationResponse(BaseModel):
+    publication_id: int
+    status: str
+    reduce_inputs: int
+    summary_generated: bool
+    tags: list[str]
+    ai_target_audience: str | None = None
+    error: str | None = None
+
+
 class RefreshRecommendationRequest(BaseModel):
     user_id: int = Field(gt=0)
     limit: int | None = Field(default=None, ge=1, le=100)
@@ -84,6 +103,19 @@ class RefreshRecommendationRequest(BaseModel):
 def _vector_to_pg_literal(vector: list[float]) -> str:
     # Parameterized query + explicit vector cast avoids SQL injection risk.
     return "[" + ",".join(f"{x:.10f}" for x in vector) + "]"
+
+
+def _pg_vector_to_list(value) -> list[float]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [float(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return [float(item) for item in value.tolist()]
+    text = str(value).strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    return [float(part) for part in text.split(",") if part.strip()]
 
 
 @contextmanager
@@ -846,6 +878,168 @@ def process_publication(request: ProcessPublicationRequest) -> ProcessPublicatio
         raise HTTPException(
             status_code=500,
             detail=f"Publication processing failed: {exc}",
+        ) from exc
+
+
+@app.post(
+    "/api/v1/publications/vectorize",
+    response_model=VectorizePublicationResponse,
+    response_class=JSONResponse,
+)
+def vectorize_publication(request: ProcessPublicationRequest) -> VectorizePublicationResponse:
+    app_state: AppState = app.state.ctx
+    pdf_source = _resolve_pdf_source(app_state, request)
+    file_hash = AIEtlPipeline._calculate_file_hash(pdf_source)
+
+    try:
+        with _pooled_connection(app_state) as conn:
+            app_state.etl_database.ensure_etl_metadata_table(conn)
+            app_state.etl_database.mark_publication_etl_running(conn, request.publication_id, file_hash)
+            conn.commit()
+
+        full_text = extract_pdf_text(
+            pdf_source,
+            enable_ocr_fallback=app_state.etl_settings.enable_ocr_fallback,
+            ocr_max_pages=app_state.etl_settings.ocr_max_pages,
+            ocr_dpi=app_state.etl_settings.ocr_dpi,
+            ocr_language=app_state.etl_settings.ocr_language,
+            ocr_min_text_chars=app_state.etl_settings.ocr_min_text_chars,
+        )
+        chunks = sliding_window_chunk(
+            text=full_text,
+            chunk_size=app_state.etl_settings.chunk_size,
+            overlap=app_state.etl_settings.chunk_overlap,
+        )
+        if not chunks:
+            raise ValueError("No valid text chunks extracted from PDF")
+
+        chunk_texts = [chunk.text for chunk in chunks]
+        vectors = app_state.etl_pipeline.embedding_client.encode(chunk_texts)
+
+        with _pooled_connection(app_state) as conn:
+            app_state.etl_database.clear_publication_vectors(conn, request.publication_id)
+            vector_rows = list(zip(chunk_texts, vectors))
+            for start in range(0, len(vector_rows), app_state.etl_settings.vector_insert_batch_size):
+                batch_rows = vector_rows[start : start + app_state.etl_settings.vector_insert_batch_size]
+                app_state.etl_database.bulk_insert_vectors(conn, request.publication_id, batch_rows)
+            app_state.etl_database.upsert_publication_file_hash(
+                conn,
+                request.publication_id,
+                file_hash,
+                chunks_count=len(chunks),
+                vectors_count=len(vectors),
+            )
+            conn.commit()
+
+        return VectorizePublicationResponse(
+            publication_id=request.publication_id,
+            status="SUCCESS",
+            chunks=len(chunks),
+            vectors=len(vectors),
+        )
+    except Exception as exc:
+        try:
+            _mark_process_failed(app_state, request.publication_id, pdf_source, exc)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Publication vectorization failed: {exc}",
+        ) from exc
+
+
+@app.post(
+    "/api/v1/publications/metadata",
+    response_model=MetadataPublicationResponse,
+    response_class=JSONResponse,
+)
+def generate_publication_metadata(request: ProcessPublicationRequest) -> MetadataPublicationResponse:
+    app_state: AppState = app.state.ctx
+    pdf_source = _resolve_pdf_source(app_state, request)
+    file_hash = AIEtlPipeline._calculate_file_hash(pdf_source)
+
+    try:
+        with _pooled_connection(app_state) as conn:
+            app_state.etl_database.ensure_etl_metadata_table(conn)
+            app_state.etl_database.mark_publication_etl_running(conn, request.publication_id, file_hash)
+            conn.commit()
+
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, chunk_text, embedding
+                    FROM ai_engine.publication_vectors
+                    WHERE publication_id = %s
+                    ORDER BY id ASC
+                    """,
+                    (request.publication_id,),
+                )
+                rows = cur.fetchall()
+
+        chunks = [Chunk(chunk_id=str(row[0]), text=str(row[1])) for row in rows if str(row[1]).strip()]
+        vectors = [_pg_vector_to_list(row[2]) for row in rows if str(row[1]).strip()]
+        if not chunks or not vectors:
+            raise ValueError("Publication has no vector chunks. Run vectorization first.")
+
+        representative_chunks = app_state.etl_pipeline._select_representative_chunks(  # noqa: SLF001
+            chunks=chunks,
+            vectors=vectors,
+            max_chunks=app_state.etl_settings.reduce_max_chunks,
+        )
+        reduce_inputs = app_state.etl_pipeline._apply_reduce_budget(representative_chunks)  # noqa: SLF001
+        if not reduce_inputs:
+            raise ValueError("No representative chunks available for metadata generation")
+
+        with _pooled_connection(app_state) as conn:
+            publication_context = app_state.etl_database.get_publication_context(conn, request.publication_id)
+
+        reduce_result = app_state.etl_pipeline._reduce_with_fallback(reduce_inputs, publication_context)  # noqa: SLF001
+        tags = [str(tag) for tag in reduce_result["tags"]]
+
+        with _pooled_connection(app_state) as conn:
+            app_state.etl_database.clear_publication_metadata(conn, request.publication_id)
+            app_state.etl_database.update_publication_summary(
+                conn,
+                request.publication_id,
+                str(reduce_result["master_summary"]),
+                str(reduce_result["audience"]),
+            )
+            tag_ids = [
+                app_state.etl_database.find_or_create_tag_id(conn, tag_name)
+                for tag_name in tags
+            ]
+            app_state.etl_database.insert_publication_tag_links(conn, request.publication_id, tag_ids)
+            app_state.etl_database.upsert_tag_translations(
+                conn,
+                tag_ids=tag_ids,
+                translated_names=[str(tag) for tag in reduce_result.get("tags_en", [])],
+                language_code="en",
+            )
+            app_state.etl_database.upsert_publication_file_hash(
+                conn,
+                request.publication_id,
+                file_hash,
+                chunks_count=len(chunks),
+                vectors_count=len(vectors),
+            )
+            conn.commit()
+
+        return MetadataPublicationResponse(
+            publication_id=request.publication_id,
+            status="SUCCESS",
+            reduce_inputs=len(reduce_inputs),
+            summary_generated=True,
+            tags=tags,
+            ai_target_audience=str(reduce_result["audience"]),
+        )
+    except Exception as exc:
+        try:
+            _mark_process_failed(app_state, request.publication_id, pdf_source, exc)
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Publication metadata generation failed: {exc}",
         ) from exc
 
 

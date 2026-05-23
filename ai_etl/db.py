@@ -71,6 +71,29 @@ class Database:
                 (publication_id,),
             )
 
+    def clear_publication_vectors(self, conn: PGConnection, publication_id: int) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM ai_engine.publication_vectors WHERE publication_id = %s",
+                (publication_id,),
+            )
+
+    def clear_publication_metadata(self, conn: PGConnection, publication_id: int) -> None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM public.publication_tags WHERE publication_id = %s",
+                (publication_id,),
+            )
+            cur.execute(
+                """
+                UPDATE public.publications
+                SET ai_summary = NULL,
+                    ai_target_audience = NULL
+                WHERE id = %s
+                """,
+                (publication_id,),
+            )
+
     def ensure_etl_metadata_table(self, conn: PGConnection) -> None:
         with conn.cursor() as cur:
             cur.execute(
