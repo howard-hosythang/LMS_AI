@@ -180,6 +180,7 @@ class AIEtlPipeline:
                 file_hash,
                 chunks_count=len(chunks),
                 vectors_count=len(vectors),
+                error_message=reduce_result.get("fallback_reason"),
             )
             conn.commit()
         except Exception:
@@ -196,6 +197,8 @@ class AIEtlPipeline:
             "audience": reduce_result["audience"],
             "tags": reduce_result["tags"],
             "translation_generated": translation_generated,
+            "metadata_fallback_used": bool(reduce_result.get("fallback_used")),
+            "metadata_fallback_reason": reduce_result.get("fallback_reason"),
         }
 
     def _try_upsert_english_metadata(
@@ -242,30 +245,42 @@ class AIEtlPipeline:
             result = self.llm_client.reduce_publication(reduce_inputs, publication_context)
             summary = str(result.get("master_summary") or "")
             if self._looks_like_catalog_or_low_value_summary(summary):
+                reason = "Gemini metadata generation returned a low-value or catalog-only summary"
                 if allow_fallback:
-                    return self._fallback_reduce_publication(reduce_inputs, publication_context)
-                raise LLMResponseError("LLM returned a low-value summary; refusing to write fallback metadata")
+                    return self._fallback_reduce_publication(reduce_inputs, publication_context, reason)
+                raise LLMResponseError(reason)
             if self._is_literature_context(publication_context) and self._has_technical_generic_tags(result.get("tags", [])):
+                reason = "Gemini metadata generation returned tags inconsistent with the catalog context"
                 if allow_fallback:
-                    return self._fallback_reduce_publication(reduce_inputs, publication_context)
-                raise LLMResponseError("LLM returned tags inconsistent with the catalog context")
+                    return self._fallback_reduce_publication(reduce_inputs, publication_context, reason)
+                raise LLMResponseError(reason)
             return result
         except Exception as exc:
             if not allow_fallback:
                 raise LLMResponseError(
-                    "LLM metadata generation failed and AI_ETL_ALLOW_METADATA_FALLBACK is disabled"
+                    "Gemini metadata generation failed and AI_ETL_ALLOW_METADATA_FALLBACK is disabled. "
+                    f"Original error: {exc}"
                 ) from exc
-            return self._fallback_reduce_publication(reduce_inputs, publication_context)
+            return self._fallback_reduce_publication(
+                reduce_inputs,
+                publication_context,
+                f"Gemini metadata generation failed; used deterministic fallback. Original error: {exc}",
+            )
 
     def _fallback_reduce_publication(
         self,
         reduce_inputs: list[str],
         publication_context: str = "",
+        reason: str | None = None,
     ) -> dict[str, object]:
         context = self._parse_publication_context(publication_context)
         joined_text = self._clean_summary_source(" ".join(reduce_inputs))
         if not self._has_content_worth_summarizing([joined_text]):
-            return self._catalog_context_reduce_publication(publication_context)
+            result = self._catalog_context_reduce_publication(publication_context)
+            if reason:
+                result["fallback_used"] = True
+                result["fallback_reason"] = reason
+            return result
 
         fallback_tags = self._extract_fallback_tags(joined_text, context, publication_context)
         summary = self._fallback_overview_summary(context, fallback_tags, joined_text)
@@ -278,6 +293,8 @@ class AIEtlPipeline:
             "audience": audience,
             "tags": fallback_tags,
             "tags_en": align_english_tags(fallback_tags),
+            "fallback_used": bool(reason),
+            "fallback_reason": reason,
         }
 
     def _catalog_context_reduce_publication(self, publication_context: str = "") -> dict[str, object]:

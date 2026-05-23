@@ -211,6 +211,23 @@ def test_reduce_with_fallback_can_be_enabled_explicitly() -> None:
     assert 3 <= len(result["tags"]) <= 5
     assert result["tags_en"]
     assert result["audience"] == "KHOA_KHOA_HOC_VA_KY_THUAT_MAY_TINH"
+    assert result["fallback_used"] is True
+    assert "Original error: LLM unavailable" in result["fallback_reason"]
+
+
+def test_reduce_with_fallback_preserves_original_gemini_error_when_disabled() -> None:
+    pipeline = _pipeline(llm=FakeLlm(should_fail=True))
+
+    with pytest.raises(LLMResponseError) as exc_info:
+        pipeline._reduce_with_fallback(
+            ["database indexing transactions and query optimization"],
+            "Title: Database Systems",
+        )
+
+    message = str(exc_info.value)
+    assert "Gemini metadata generation failed" in message
+    assert "AI_ETL_ALLOW_METADATA_FALLBACK is disabled" in message
+    assert "Original error: LLM unavailable" in message
 
 
 def test_try_upsert_english_metadata_writes_optional_translation_and_tag_aliases() -> None:

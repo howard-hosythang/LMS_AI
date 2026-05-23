@@ -135,6 +135,7 @@ class Database:
         file_hash: str,
         chunks_count: int = 0,
         vectors_count: int = 0,
+        error_message: str | None = None,
     ) -> None:
         with conn.cursor() as cur:
             cur.execute(
@@ -148,17 +149,23 @@ class Database:
                     vectors_count,
                     updated_at
                 )
-                VALUES (%s, %s, 'SUCCESS', NULL, %s, %s, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, 'SUCCESS', %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT (publication_id)
                 DO UPDATE SET
                     file_hash = EXCLUDED.file_hash,
                     status = 'SUCCESS',
-                    error_message = NULL,
+                    error_message = EXCLUDED.error_message,
                     chunks_count = EXCLUDED.chunks_count,
                     vectors_count = EXCLUDED.vectors_count,
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (publication_id, file_hash, chunks_count, vectors_count),
+                (
+                    publication_id,
+                    file_hash,
+                    error_message[:2000] if error_message else None,
+                    chunks_count,
+                    vectors_count,
+                ),
             )
 
     def mark_publication_etl_running(

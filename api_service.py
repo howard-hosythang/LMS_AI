@@ -942,6 +942,11 @@ def process_publication(request: ProcessPublicationRequest) -> ProcessPublicatio
                 if output.get("ai_target_audience")
                 else None
             ),
+            error=(
+                str(result.get("metadata_fallback_reason"))
+                if result.get("metadata_fallback_reason")
+                else None
+            ),
         )
     except Exception as exc:
         try:
@@ -1104,6 +1109,7 @@ def generate_publication_metadata(request: ProcessPublicationRequest) -> Metadat
             summary_generated=True,
             tags=tags,
             ai_target_audience=str(reduce_result["audience"]),
+            error=str(reduce_result["fallback_reason"]) if reduce_result.get("fallback_reason") else None,
         )
     except Exception as exc:
         try:
