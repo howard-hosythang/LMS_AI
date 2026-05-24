@@ -93,8 +93,8 @@ def load_settings() -> Settings:
             False,
         ),
         allow_metadata_fallback=_parse_bool(
-            os.getenv("AI_ETL_ALLOW_METADATA_FALLBACK", "true"),
-            True,
+            os.getenv("AI_ETL_ALLOW_METADATA_FALLBACK", "false"),
+            False,
         ),
         enable_ocr_fallback=_parse_bool(os.getenv("AI_ETL_ENABLE_OCR_FALLBACK", "true"), True),
         ocr_max_pages=max(0, int(os.getenv("AI_ETL_OCR_MAX_PAGES", "32"))),
