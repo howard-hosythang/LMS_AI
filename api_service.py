@@ -884,6 +884,7 @@ async def lifespan(app: FastAPI):
         recommender=recommender,
     )
 
+    embedding_model.encode("library search warmup", normalize_embeddings=True)
     await recommender.load_or_train(lambda: _pooled_connection(app_state))
     app_state.retrain_task = asyncio.create_task(_retrain_loop(app_state))
 
