@@ -51,6 +51,7 @@ class SimilarPublicationsResponse(BaseModel):
 
 class RecommendationRequest(BaseModel):
     user_id: int = Field(gt=0)
+    faculty: str | None = Field(default=None, max_length=100)
     limit: int | None = Field(default=None, ge=1, le=100)
 
 
@@ -786,14 +787,19 @@ def _persist_recommendations(
             cur.execute(
                 """
                 INSERT INTO public.ai_recommendations (user_id, pub_ids, strategy, computed_at)
-                VALUES (%s, %s, %s, NOW())
+                SELECT %s, %s, %s, NOW()
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM public.users
+                    WHERE id = %s
+                )
                 ON CONFLICT (user_id)
                 DO UPDATE SET
                     pub_ids = EXCLUDED.pub_ids,
                     strategy = EXCLUDED.strategy,
                     computed_at = NOW()
                 """,
-                (user_id, Json(publication_ids), strategy[:30]),
+                (user_id, Json(publication_ids), strategy[:30], user_id),
             )
         conn.commit()
 
