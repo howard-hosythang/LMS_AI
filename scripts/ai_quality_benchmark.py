@@ -187,6 +187,17 @@ def post_json(api_base_url: str, path: str, payload: dict[str, Any]) -> tuple[di
     return response.json(), elapsed_ms
 
 
+def get_nested_value(payload: dict[str, Any], path: str) -> Any:
+    current: Any = payload
+    for part in path.split("."):
+        if not part:
+            continue
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
 def evaluate_metadata(
     cases: list[dict[str, Any]],
     metadata_outputs: dict[int, dict[str, Any]] | None = None,
@@ -228,6 +239,9 @@ def evaluate_ranked_cases(
     k: int,
     api_base_url: str | None = None,
     endpoint: str | None = None,
+    semantic_path: str = "/api/v1/semantic-search",
+    semantic_query_field: str = "query_text",
+    semantic_ids_path: str = "publication_ids",
 ) -> tuple[list[dict[str, Any]], dict[str, float], list[float]]:
     rows: list[dict[str, Any]] = []
     latencies: list[float] = []
@@ -240,10 +254,10 @@ def evaluate_ranked_cases(
                 if endpoint == "semantic-search":
                     body, elapsed_ms = post_json(
                         api_base_url,
-                        "/api/v1/semantic-search",
-                        {"query_text": case["query"], "limit": k},
+                        semantic_path,
+                        {semantic_query_field: case["query"], "limit": k},
                     )
-                    returned_ids = [int(item) for item in body.get("publication_ids", [])]
+                    returned_ids = [int(item) for item in (get_nested_value(body, semantic_ids_path) or [])]
                 elif endpoint == "recommendations":
                     body, elapsed_ms = post_json(
                         api_base_url,
@@ -397,6 +411,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         k=args.k,
         api_base_url=args.api_base_url,
         endpoint="semantic-search" if args.api_base_url else None,
+        semantic_path=args.semantic_path,
+        semantic_query_field=args.semantic_query_field,
+        semantic_ids_path=args.semantic_ids_path,
     )
     recommendation_rows, recommendation_aggregate, recommendation_latencies = evaluate_ranked_cases(
         dataset.get("recommendation_cases", []),
@@ -447,6 +464,9 @@ def main() -> None:
     )
     parser.add_argument("--k", type=int, default=5, help="Ranking cutoff for search/recommendation metrics.")
     parser.add_argument("--api-base-url", default=None, help="Optional live AI API base URL, e.g. http://127.0.0.1:8001")
+    parser.add_argument("--semantic-path", default="/api/v1/semantic-search")
+    parser.add_argument("--semantic-query-field", default="query_text")
+    parser.add_argument("--semantic-ids-path", default="publication_ids")
     parser.add_argument("--db-url", default=None, help="Optional PostgreSQL URL to read current AI summary/tags by publication_id.")
     parser.add_argument("--latency-budget-ms", type=float, default=200.0)
     parser.add_argument("--json-out", default=None)
