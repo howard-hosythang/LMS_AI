@@ -21,16 +21,19 @@
 ## 📦 Yêu Cầu Hệ Thống
 
 **Phần Cứng Tối Thiểu:**
+
 - CPU: 2 cores (4+ recommended)
 - RAM: 4GB (8GB+ recommended)
 - Disk: 10GB free space
 
 **Phần Mềm Bắt Buộc:**
+
 - **Python 3.10+** - [Tải tại đây](https://www.python.org/downloads/)
 - **Docker & Docker Compose** - [Tải tại đây](https://docs.docker.com/get-docker/)
 - **Git** - [Tải tại đây](https://git-scm.com/download)
 
 **Tài Khoản & API Keys:**
+
 - [Google Gemini API Key](https://aistudio.google.com/apikey) (miễn phí)
 - PostgreSQL 16+ (kèm theo Docker)
 - RabbitMQ (kèm theo Docker)
@@ -66,6 +69,7 @@ source venv/bin/activate
 ```
 
 **Kiểm tra xem đã kích hoạt chưa:**
+
 - Prompt terminal sẽ có tiền tố `(venv)`
 - Ví dụ: `(venv) $ python --version`
 
@@ -85,6 +89,7 @@ pip list | grep -E "fastapi|torch|sentence-transformers|psycopg2"
 ```
 
 **Các Package Chính:**
+
 - `fastapi==0.135.3` - Web framework
 - `sentence-transformers==3.4.1` - Embedding models
 - `psycopg2-binary==2.9.11` - PostgreSQL driver
@@ -120,6 +125,7 @@ GEMINI_API_KEY=your_api_key_here_from_aistudio.google.com
 ```
 
 **Cách Lấy Gemini API Key:**
+
 1. Mở https://aistudio.google.com/apikey
 2. Click "Create API key in new Google Cloud project"
 3. Copy key và dán vào `.env`
@@ -342,6 +348,7 @@ docker-compose logs --tail=100
 **Nguyên Nhân:** Chưa cấu hình API key hoặc `.env` không được load
 
 **Giải Pháp:**
+
 ```bash
 # Kiểm tra file .env tồn tại
 ls -la .env
@@ -359,6 +366,7 @@ nano .env
 **Nguyên Nhân:** PostgreSQL không chạy hoặc port sai
 
 **Giải Pháp:**
+
 ```bash
 # Kiểm tra PostgreSQL container
 docker-compose ps postgres
@@ -376,6 +384,7 @@ netstat -ano | findstr :5433  # Windows
 **Nguyên Nhân:** Model embedding thay đổi (từ 384D sang 768D)
 
 **Giải Pháp:**
+
 ```bash
 # Xóa dữ liệu cũ
 docker-compose down -v
@@ -390,6 +399,7 @@ docker-compose up -d
 **Nguyên Nhân:** RabbitMQ không chạy hoặc queue không kết nối
 
 **Giải Pháp:**
+
 ```bash
 # Kiểm tra RabbitMQ
 docker-compose logs rabbitmq
@@ -474,11 +484,11 @@ curl http://localhost:8001/health
 
 ### Dashboard URLs
 
-| Service | URL | Username | Password |
-|---------|-----|----------|----------|
-| **Swagger API** | http://localhost:8001/docs | - | - |
-| **RabbitMQ** | http://localhost:15672 | guest | guest |
-| **PostgreSQL** | localhost:5433 | postgres | postgres |
+| Service         | URL                        | Username | Password |
+| --------------- | -------------------------- | -------- | -------- |
+| **Swagger API** | http://localhost:8001/docs | -        | -        |
+| **RabbitMQ**    | http://localhost:15672     | guest    | guest    |
+| **PostgreSQL**  | localhost:5433             | postgres | postgres |
 
 ### Kiểm Tra Performance
 
@@ -492,7 +502,7 @@ locust -f scripts/load_test.py --host=http://localhost:8001
 
 # Database stats
 docker-compose exec postgres psql -U postgres -d postgres << EOF
-SELECT 
+SELECT
   COUNT(*) as total_chunks,
   COUNT(DISTINCT publication_id) as publications,
   pg_size_pretty(pg_total_relation_size('ai_engine.publication_vectors')) as vector_table_size
@@ -519,16 +529,18 @@ Trước khi deploy lên production:
 ## 📞 Support & Troubleshooting
 
 **Cần giúp?**
+
 1. Kiểm tra logs: `docker-compose logs -f`
 2. Xem file `.env` có đúng không
 3. Restart services: `docker-compose restart`
 4. Xóa & tái tạo: `docker-compose down -v && docker-compose up -d`
 
 **Liên hệ:**
+
 - Email: your-email@example.com
 - Issues: https://github.com/howard-hosythang/LMS_AI/issues
 
 ---
 
-**Bản Cập Nhật:** May 12, 2026  
+**Bản Cập Nhật:** May 12, 2026
 **Phiên Bản:** 1.0.0

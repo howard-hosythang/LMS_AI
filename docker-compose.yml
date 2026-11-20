@@ -19,11 +19,11 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://library:library@host.docker.internal:5432/library}
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://library:library@host.docker.internal:5433/library}
       RABBITMQ_URL: ${DOCKER_RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
       FASTAPI_PORT: ${FASTAPI_PORT:-8001}
       DB_HOST: ${DB_HOST:-host.docker.internal}
-      DB_PORT: 5432
+      DB_PORT: 5433
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       HF_HOME: /models/hf
@@ -50,10 +50,10 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://library:library@host.docker.internal:5432/library}
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql://library:library@host.docker.internal:5433/library}
       RABBITMQ_URL: ${DOCKER_RABBITMQ_URL:-amqp://guest:guest@rabbitmq:5672/}
       DB_HOST: ${DB_HOST:-host.docker.internal}
-      DB_PORT: 5432
+      DB_PORT: 5433
       RABBITMQ_HOST: rabbitmq
       RABBITMQ_PORT: 5672
       HF_HOME: /models/hf
